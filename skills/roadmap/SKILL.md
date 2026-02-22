@@ -1,15 +1,19 @@
 ---
 name: roadmap
-description: Generate a strategic feature roadmap from project understanding. Reads discovery.json if available, analyzes codebase, produces prioritized features organized into phases. Writes roadmap.json.
+description: Generate a strategic feature roadmap from project understanding. Reads discovery.json if available, analyzes codebase, produces prioritized features organized into phases. Writes roadmap.json. Optionally integrates competitor analysis for market-informed prioritization.
 ---
 
 # cc-master:roadmap — Strategic Feature Generation
 
 Generate a prioritized feature roadmap for this project. Analyze what exists, identify what's missing, and organize features into dependency-ordered phases with MoSCoW prioritization.
 
+When competitor analysis is available, features are enriched with user stories, linked to competitor insights, and given priority boosts based on market pain points.
+
 ## Process
 
 ### Step 1: Load Context
+
+**If `--auto` or `--competitors` is present in arguments**, strip them before parsing any other arguments. Remember which flags were present — `--auto` controls chaining behavior at the end, `--competitors` triggers inline competitor analysis.
 
 1. Check if `.cc-master/discovery.json` exists using Glob. If it does, read it — this is your primary context. Discovery has already traced the codebase deeply.
 
@@ -20,6 +24,16 @@ Generate a prioritized feature roadmap for this project. Analyze what exists, id
    - Print: `No discovery.json found — running lightweight analysis. For deeper results, run /cc-master:discover first.`
 
 3. Check if `.cc-master/roadmap.json` already exists. If it does, read it to preserve features that have status `planned`, `in_progress`, or `done` — these must not be overwritten or removed.
+
+4. **Competitor context (optional):**
+
+   a. If `--competitors` flag was present: Invoke the Skill tool with `skill: "cc-master:competitors"` now. Wait for it to complete, then read the resulting `.cc-master/competitor_analysis.json`. Continue with step 2 below using the competitor data.
+
+   b. Otherwise, check if `.cc-master/competitor_analysis.json` exists using Glob. If it does, read it — a previous competitor analysis run produced this data. **Validate that `pain_points` and `market_gaps` are arrays.** If the file is malformed, print `Competitor analysis file is malformed — proceeding without competitor data.` and continue as if no competitor data exists. Otherwise print: `Found competitor analysis — incorporating market insights into roadmap.`
+
+   c. If neither flag nor file exists, proceed without competitor data. The roadmap works fine without it — competitor integration is purely additive.
+
+   **Note:** When chaining from `/cc-master:competitors`, the competitor_analysis.json file is already written before roadmap starts, so path (b) detects it automatically — no `--competitors` flag needed.
 
 ### Step 2: Analyze Gaps and Opportunities
 
@@ -41,6 +55,11 @@ Based on your understanding of the project, identify:
 - Documentation gaps
 - Performance optimizations
 
+**Competitor-derived gaps** (only when competitor_analysis.json is loaded):
+- **Pain points to solve:** Critical and high-severity pain points from competitors that this project could address. These represent known user frustrations.
+- **Market gaps as differentiators:** Gaps with `strong` or `moderate` differentiator potential. Features addressing these set the project apart from competitors.
+- **Table stakes:** Features that all analyzed competitors have. The project needs these to be competitive — they don't differentiate but their absence is a dealbreaker.
+
 **Do not fabricate gaps.** If the project is complete and well-built, say so. A roadmap with 3 real features is better than one with 20 invented ones.
 
 ### Step 3: Generate Features
@@ -60,6 +79,19 @@ For each identified gap/opportunity, create a feature entry:
 - **acceptance_criteria**: 3-5 specific, testable criteria
 - **dependencies**: IDs of features that must be done first
 
+**Additional fields when competitor data is available:**
+
+- **user_stories** (optional): 1-3 user stories in "As a [role], I want [capability] so that [benefit]" format. Derived from pain points and market gaps — these ground the feature in real user needs.
+- **competitor_insight_ids** (optional): Array of pain point and/or gap IDs from competitor_analysis.json that this feature addresses (e.g., `["pp-3", "pp-7", "gap-2"]`). Links the feature back to market evidence.
+- **priority_rationale** (optional): One sentence explaining why this priority was chosen. Especially useful when competitor data influenced the decision (e.g., "Elevated to must: addresses critical pain point across 3 competitors").
+
+**Priority boost rules when competitor data is available:**
+- Pain points with severity `critical` + frequency `widespread`/`common` → boost the addressing feature to `must` (unless it's already `must`)
+- Pain points with severity `high` + frequency `widespread` → boost to `should` minimum
+- Market gaps with `high` opportunity + `strong` differentiator → boost to `should` minimum
+- Table stakes features → boost to `must` (competitive baseline)
+- Document any boost in `priority_rationale`
+
 ### Step 4: Organize into Phases
 
 Group features into sequential phases based on dependencies and priority:
@@ -69,6 +101,8 @@ Group features into sequential phases based on dependencies and priority:
 - Each phase should be independently shippable — completing phase N leaves the project in a working state
 - Name phases descriptively ("Foundation", "Core Experience", "Polish & Scale")
 
+**When competitor data is available**, each phase may include an optional `milestones` array — 1-3 milestone descriptions that frame what the phase achieves in market terms (e.g., "Reach feature parity with Competitor X on core workflows", "Address top 3 user pain points from competitor reviews").
+
 ### Step 5: Write roadmap.json
 
 Create `.cc-master/` directory if needed. Write `.cc-master/roadmap.json`:
@@ -76,13 +110,21 @@ Create `.cc-master/` directory if needed. Write `.cc-master/roadmap.json`:
 ```json
 {
   "vision": "One-line product vision inferred from the codebase",
+  "competitor_context": {
+    "analysis_available": true,
+    "competitors_analyzed": 4,
+    "pain_points_addressed": 8,
+    "gaps_targeted": 3,
+    "source_file": ".cc-master/competitor_analysis.json"
+  },
   "phases": [
     {
       "id": "phase-1",
       "name": "Foundation",
       "description": "Core infrastructure and critical fixes",
       "order": 1,
-      "features": ["feat-1", "feat-2"]
+      "features": ["feat-1", "feat-2"],
+      "milestones": ["Achieve table-stakes parity with competitors"]
     }
   ],
   "features": [
@@ -102,7 +144,12 @@ Create `.cc-master/` directory if needed. Write `.cc-master/roadmap.json`:
         "Token refresh works without re-login",
         "Invalid credentials return 401"
       ],
-      "status": "idea"
+      "status": "idea",
+      "user_stories": [
+        "As a user, I want to create an account so that my data persists across sessions"
+      ],
+      "competitor_insight_ids": ["pp-3", "gap-1"],
+      "priority_rationale": "Table stakes: all competitors provide authentication"
     }
   ],
   "metadata": {
@@ -115,7 +162,14 @@ Create `.cc-master/` directory if needed. Write `.cc-master/roadmap.json`:
 }
 ```
 
-**Preserving existing features:** If a previous `roadmap.json` existed with features that had status `planned`, `in_progress`, or `done`, merge them back into the new roadmap. Match by `id` first, then by title. Never discard user-managed features.
+**Schema notes:**
+
+- `competitor_context` is a **top-level optional object**. Include it only when competitor analysis was used. Omit it entirely when no competitor data was available. It summarizes the competitor influence without duplicating the full analysis. Calculate `pain_points_addressed` as the count of distinct pain point IDs from competitor_analysis.json that appear in any feature's `competitor_insight_ids`. Calculate `gaps_targeted` similarly for gap IDs.
+- `milestones` on phases is an **optional array**. Include only when competitor data was used. Omit the field entirely otherwise.
+- `user_stories`, `competitor_insight_ids`, and `priority_rationale` on features are **optional fields**. Include only on features that were informed by competitor analysis. Omit them entirely on features without competitor linkage.
+- kanban-add reads: `id`, `title`, `description`, `rationale`, `priority`, `complexity`, `acceptance_criteria`, `dependencies`, `status`, plus optionally `user_stories`, `competitor_insight_ids`, and `priority_rationale` when present. kanban-add resolves `competitor_insight_ids` against `competitor_analysis.json` to embed evidence text into task descriptions.
+
+**Preserving existing features:** If a previous `roadmap.json` existed with features that had status `planned`, `in_progress`, or `done`, merge them back into the new roadmap. Match by `id` first (preferred). Only fall back to title matching if no ID match exists, and when matching by title, only merge if the existing feature's `phase_id` also aligns with the new feature's intended phase — if ambiguous, treat as a new feature. Never discard user-managed features.
 
 ### Step 6: Print Summary
 
@@ -137,10 +191,63 @@ Phase 3: <name> (<count> features)
 
 Total: <n> features across <m> phases
   <must_count> must | <should_count> should | <could_count> could | <wont_count> won't
-
-Written to .cc-master/roadmap.json
-Next: /cc-master:kanban-add --from-roadmap to convert features to tasks.
 ```
+
+**When competitor data was used**, enhance feature lines with per-feature evidence. For each feature that has `competitor_insight_ids`, resolve the IDs against `competitor_analysis.json` (already loaded in Step 1) and show up to 3 evidence lines below the feature title:
+
+```
+Phase 1: Foundation (3 features)
+  MUST   [high] Add dark mode
+                 ↳ "Eye strain complaints across competitors" — G2 reviews
+                 ↳ "No dark mode despite modern UI" — Reddit r/saas
+  MUST   [med]  Fix auth flow
+  SHOULD [low]  Add i18n (table stakes)
+                 ↳ "All competitors support 5+ languages" — cross-competitor gap
+```
+
+**Evidence line rendering rules:**
+- For pain points (`pp-*` IDs): `↳ "<description>" — <source>`
+- For market gaps (`gap-*` IDs): `↳ "<description>" — cross-competitor gap`
+- Cap at 3 evidence lines per feature. If more exist, show `↳ + N more insights`
+- Only show evidence for features that have `competitor_insight_ids` — features without them display normally with no extra lines
+- Indent evidence lines to align with the feature title (after the priority/complexity prefix)
+
+**When competitor data was used, add this section before the totals:**
+
+```
+Competitor-Informed Features:
+  <count> features linked to competitor insights
+  <count> features boosted by pain point severity
+  <count> table-stakes features added
+  Top addressed gaps: <gap descriptions>
+```
+
+Then print:
+```
+Written to .cc-master/roadmap.json
+Pipeline: kanban-add --from-roadmap is the next step.
+```
+
+## Chain Point
+
+After displaying the summary above, offer to continue to the next pipeline step.
+
+**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:kanban-add"` and `args: "--from-roadmap --auto"`. Then stop.
+
+**Note:** When using `--auto` with competitor-enriched roadmaps, web-scraped evidence text flows into task descriptions without manual review. Users should review competitor-informed task descriptions (marked `[C]`) before acting on them.
+
+**Otherwise, present this to the user:**
+
+> Continue to kanban-add?
+>
+> 1. **Yes** — proceed to /cc-master:kanban-add --from-roadmap
+> 2. **Auto** — run all remaining pipeline steps without pausing
+> 3. **Stop** — end here
+
+Then wait for the user's response:
+- "1", "yes", "y": Invoke Skill with `skill: "cc-master:kanban-add"`, `args: "--from-roadmap"`. Stop.
+- "2", "auto", "a": Invoke Skill with `skill: "cc-master:kanban-add"`, `args: "--from-roadmap --auto"`. Stop.
+- "3", "stop", or anything else: Print "Stopped. Run /cc-master:kanban-add --from-roadmap when ready." End.
 
 ## What NOT To Do
 
@@ -150,3 +257,4 @@ Next: /cc-master:kanban-add --from-roadmap to convert features to tasks.
 - Do not generate more than 20 features — focus on the highest-value items
 - Do not remove features with status planned/in_progress/done from an existing roadmap
 - Do not modify any project files besides .cc-master/roadmap.json
+- Do not fabricate competitor insights — only use data from competitor_analysis.json

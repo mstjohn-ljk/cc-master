@@ -32,6 +32,10 @@ The task is specified via arguments. Accept any of:
    - What language/framework
    - What patterns are used (read 2-3 existing implementations as examples)
    - Where new code should go based on existing structure
+3. **Competitor enrichment (optional):** If the feature being spec'd has `competitor_insight_ids` in roadmap.json, check if `.cc-master/competitor_analysis.json` exists. If it does, read it and look up the referenced pain point and gap IDs. Use these to:
+   - Add more specific acceptance criteria grounded in real user pain points (e.g., if a pain point says "slow import takes 5+ minutes", add a criterion like "Import completes within 30 seconds for typical datasets")
+   - Include the pain point context in the spec's Requirement section so the implementer understands the market motivation
+   - Do NOT let competitor data override the feature's core requirements — it enriches, not replaces
 
 ### Step 3: Analyze What Needs to Change
 

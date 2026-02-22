@@ -47,7 +47,7 @@ Look for a metadata block in the task description (set by `cc-master:kanban-add`
 -->
 ```
 
-If present, extract `source` and `priority` for display badges.
+If present, extract `source`, `priority`, and `competitor_insight_ids` for display badges. If `competitor_insight_ids` is present and non-empty, the task is competitor-informed.
 
 ### Step 4: Render the Board
 
@@ -78,7 +78,10 @@ Source badge (shown on next line or after title if space permits):
 - `[R]` = from roadmap
 - `[M]` = manual
 - `[I]` = from insights
+- `[C]` = competitor-informed (shown alongside source badge, not replacing it)
 - No badge if source unknown
+
+A task can have multiple badges — e.g., `[R][C]` means "from roadmap, competitor-informed". The `[C]` badge is shown whenever `competitor_insight_ids` is present and non-empty in the task metadata.
 
 Owner (shown below task title when assigned):
 - `@agent-name` — truncate name to fit column
@@ -133,8 +136,10 @@ When `--detail` is passed, render as a grouped list with full descriptions:
 ```
 ## Backlog (3)
 
-  #1 Add dark mode                          P:high     [R]
+  #1 Add dark mode                          P:high     [R][C]
      Implement dark/light theme toggle with system preference detection
+     Evidence: [critical] "Eye strain complaints across competitors" — G2 reviews (widespread)
+     Evidence: [high] "No dark mode despite modern UI" — Reddit r/saas (common)
      Blocked by: #5 Setup CI
 
   #2 Add i18n support                       P:normal   [R]
@@ -167,11 +172,33 @@ When `--detail` is passed, render as a grouped list with full descriptions:
 ```
 
 In detail view:
-- Show task ID (from TaskList), full subject, priority, source badge, and owner
+- Show task ID (from TaskList), full subject, priority, source badge(s), and owner
 - Show first line of description below the title
+- For competitor-informed tasks (`[C]` badge), show evidence lines below the description:
+  - Parse the task description for text between `Market Evidence:` and `Acceptance Criteria:` headers
+  - Display each evidence line prefixed with `Evidence:` and indented to align with the description
+  - Show up to 3 evidence lines; if more exist, append `+ N more`
+  - **Defensive parsing:** If the delimiters are missing, malformed, or yield zero parseable lines, skip the evidence display for that task rather than rendering corrupt content
 - For in-progress tasks, show subtask completion if subtasks exist (count completed vs total from blockedBy relationships)
 - For blocked tasks, show what blocks them
 - For done tasks, just show "completed"
+
+Example with competitor evidence:
+```
+## Backlog (3)
+
+  #1 Add dark mode                          P:high     [R][C]
+     Implement dark/light theme toggle with system preference detection
+     Evidence: [critical] "Eye strain complaints across competitors" — G2 reviews (widespread)
+     Evidence: [high] "No dark mode despite modern UI" — Reddit r/saas (common)
+     Blocked by: #5 Setup CI
+
+  #4 Add real-time sync                     P:high     [R][C]
+     Real-time data synchronization using WebSockets
+     Evidence: [critical] "Sync delays frustrating power users" — ProductHunt reviews (widespread)
+     Evidence: [high] "Competitors sync instantly, ours lags 30s" — internal surveys (common)
+     + 2 more
+```
 
 ### Compact View (`--compact`)
 
