@@ -26,14 +26,31 @@ Run /cc-master:qa-loop first.
 ```
 And stop.
 
-### Step 2: Check for PR Flag
+### Step 2: Commit All Changes in Worktree
+
+**This step is mandatory and must complete before any merge or PR operation.**
+
+Build and QA agents frequently leave uncommitted changes in the worktree. If these are not committed first, the merge will either fail or silently lose work.
+
+1. Navigate to the worktree directory: `.cc-master/worktrees/<task-slug>`
+2. Run `git status` to check for uncommitted changes (staged, unstaged, and untracked files)
+3. **If there are ANY uncommitted changes:**
+   a. Stage all relevant files (`git add` — exclude `.cc-master/` state files, `.env`, and other non-source files)
+   b. Commit with message: `"Implement: <task title>"`
+   c. Run `git status` again to confirm the working tree is clean
+4. **If the working tree is already clean:** proceed to Step 3
+5. **If the commit fails for any reason:** stop and report the error. Do not proceed to merge with uncommitted changes.
+
+**Do NOT skip this step.** Even if you believe all changes were committed during build/qa-fix, verify it. Uncommitted changes in a worktree are silently lost on merge.
+
+### Step 3: Check for PR Flag
 
 Parse arguments for `--pr` flag:
 - `complete 3` — merge directly to current branch
 - `complete 3 --pr` — create a pull request instead of merging
 - `complete 3 --pr --target develop` — PR against specific branch
 
-### Step 3: Merge or PR
+### Step 4: Merge or PR
 
 **Direct merge (default):**
 
@@ -86,7 +103,7 @@ See .cc-master/specs/<task-id>.md"
 
 Print the PR URL when done.
 
-### Step 4: Clean Up Worktree
+### Step 5: Clean Up Worktree
 
 After successful merge or PR creation:
 
@@ -100,19 +117,19 @@ Worktree kept at .cc-master/worktrees/<task-slug> (branch needed for PR).
 Remove after PR merges: git worktree remove .cc-master/worktrees/<task-slug>
 ```
 
-### Step 5: Update Task Status
+### Step 6: Update Task Status
 
 1. Call `TaskUpdate` to mark the parent task as `completed`
 2. Mark any remaining subtasks as `completed` via `TaskUpdate`
 
-### Step 6: Update Roadmap (if applicable)
+### Step 7: Update Roadmap (if applicable)
 
 1. Read the task metadata for a `feature_id` reference
 2. If it links to a roadmap feature, read `.cc-master/roadmap.json`
 3. Update the feature's status to `done`
 4. Write the updated roadmap back
 
-### Step 7: Print Summary
+### Step 8: Print Summary
 
 ```
 Task Complete: Add user authentication
@@ -136,6 +153,7 @@ Phase 1 "Foundation" is now complete! (3/3 features done)
 ## What NOT To Do
 
 - Do not complete a task that hasn't passed QA — always verify the review report
+- Do not merge or create a PR with uncommitted changes in the worktree — always commit first (Step 2)
 - Do not force-push or force-merge — if there are conflicts, stop and ask
 - Do not delete the worktree if it's needed for an open PR
 - Do not modify any implementation files — this skill only merges and updates status
