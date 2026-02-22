@@ -15,6 +15,8 @@ The task is specified via arguments. Accept any of:
 - A task ID from the kanban: `spec 3` or `spec #3`
 - A task title or description: `spec "Add user authentication"`
 
+**If `--auto` is present in arguments**, strip it before parsing (it controls chaining behavior at the end, not task identification). Remember that `--auto` was present for the Chain Point step.
+
 **If a task ID is provided:**
 1. Call `TaskGet` with the ID to load the full task
 2. Read its subject and description for the requirement
@@ -148,8 +150,27 @@ Wave 1 (parallel): #14, #15
 Wave 2 (parallel): #16, #17
 Wave 3: #18
 
-Next: /cc-master:build to start implementation.
+Pipeline: build is the next step.
 ```
+
+## Chain Point
+
+After displaying the summary above, offer to continue to the next pipeline step. The task ID from Step 1 is forwarded to the next skill.
+
+**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:build"` and `args: "<task-id> --auto"`. Then stop.
+
+**Otherwise, present this to the user:**
+
+> Continue to build?
+>
+> 1. **Yes** — proceed to /cc-master:build <task-id>
+> 2. **Auto** — run all remaining pipeline steps without pausing
+> 3. **Stop** — end here
+
+Then wait for the user's response:
+- "1", "yes", "y": Invoke Skill with `skill: "cc-master:build"`, `args: "<task-id>"`. Stop.
+- "2", "auto", "a": Invoke Skill with `skill: "cc-master:build"`, `args: "<task-id> --auto"`. Stop.
+- "3", "stop", or anything else: Print "Stopped. Run /cc-master:build <task-id> when ready." End.
 
 ## What NOT To Do
 

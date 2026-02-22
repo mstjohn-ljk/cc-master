@@ -13,6 +13,8 @@ Merge the implementation back, close the task on the kanban, and optionally crea
 
 Arguments should provide a task ID: `complete 3` or `complete #3`
 
+**If `--auto` is present in arguments**, strip it before parsing the task ID and `--pr`/`--target` flags. Complete is the terminal pipeline skill so `--auto` is simply ignored.
+
 1. Call `TaskGet` to load the task
 2. Read the review report from `.cc-master/specs/<task-id>-review.json`
 3. Verify the latest review status is `pass` (score >= 90, no critical/high findings)
