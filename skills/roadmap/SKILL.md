@@ -29,7 +29,7 @@ When competitor analysis is available, features are enriched with user stories, 
 
    a. If `--competitors` flag was present: Invoke the Skill tool with `skill: "cc-master:competitors"` now. Wait for it to complete, then read the resulting `.cc-master/competitor_analysis.json`. Continue with step 2 below using the competitor data.
 
-   b. Otherwise, check if `.cc-master/competitor_analysis.json` exists using Glob. If it does, read it — a previous competitor analysis run produced this data. Print: `Found competitor analysis — incorporating market insights into roadmap.`
+   b. Otherwise, check if `.cc-master/competitor_analysis.json` exists using Glob. If it does, read it — a previous competitor analysis run produced this data. **Validate that `pain_points` and `market_gaps` are arrays.** If the file is malformed, print `Competitor analysis file is malformed — proceeding without competitor data.` and continue as if no competitor data exists. Otherwise print: `Found competitor analysis — incorporating market insights into roadmap.`
 
    c. If neither flag nor file exists, proceed without competitor data. The roadmap works fine without it — competitor integration is purely additive.
 
@@ -167,9 +167,9 @@ Create `.cc-master/` directory if needed. Write `.cc-master/roadmap.json`:
 - `competitor_context` is a **top-level optional object**. Include it only when competitor analysis was used. Omit it entirely when no competitor data was available. It summarizes the competitor influence without duplicating the full analysis. Calculate `pain_points_addressed` as the count of distinct pain point IDs from competitor_analysis.json that appear in any feature's `competitor_insight_ids`. Calculate `gaps_targeted` similarly for gap IDs.
 - `milestones` on phases is an **optional array**. Include only when competitor data was used. Omit the field entirely otherwise.
 - `user_stories`, `competitor_insight_ids`, and `priority_rationale` on features are **optional fields**. Include only on features that were informed by competitor analysis. Omit them entirely on features without competitor linkage.
-- kanban-add reads: `id`, `title`, `description`, `rationale`, `priority`, `complexity`, `acceptance_criteria`, `dependencies`, `status`. All new fields are additive and ignored by kanban-add — **zero breaking changes**.
+- kanban-add reads: `id`, `title`, `description`, `rationale`, `priority`, `complexity`, `acceptance_criteria`, `dependencies`, `status`, plus optionally `user_stories`, `competitor_insight_ids`, and `priority_rationale` when present. kanban-add resolves `competitor_insight_ids` against `competitor_analysis.json` to embed evidence text into task descriptions.
 
-**Preserving existing features:** If a previous `roadmap.json` existed with features that had status `planned`, `in_progress`, or `done`, merge them back into the new roadmap. Match by `id` first, then by title. Never discard user-managed features.
+**Preserving existing features:** If a previous `roadmap.json` existed with features that had status `planned`, `in_progress`, or `done`, merge them back into the new roadmap. Match by `id` first (preferred). Only fall back to title matching if no ID match exists, and when matching by title, only merge if the existing feature's `phase_id` also aligns with the new feature's intended phase — if ambiguous, treat as a new feature. Never discard user-managed features.
 
 ### Step 6: Print Summary
 
@@ -193,6 +193,25 @@ Total: <n> features across <m> phases
   <must_count> must | <should_count> should | <could_count> could | <wont_count> won't
 ```
 
+**When competitor data was used**, enhance feature lines with per-feature evidence. For each feature that has `competitor_insight_ids`, resolve the IDs against `competitor_analysis.json` (already loaded in Step 1) and show up to 3 evidence lines below the feature title:
+
+```
+Phase 1: Foundation (3 features)
+  MUST   [high] Add dark mode
+                 ↳ "Eye strain complaints across competitors" — G2 reviews
+                 ↳ "No dark mode despite modern UI" — Reddit r/saas
+  MUST   [med]  Fix auth flow
+  SHOULD [low]  Add i18n (table stakes)
+                 ↳ "All competitors support 5+ languages" — cross-competitor gap
+```
+
+**Evidence line rendering rules:**
+- For pain points (`pp-*` IDs): `↳ "<description>" — <source>`
+- For market gaps (`gap-*` IDs): `↳ "<description>" — cross-competitor gap`
+- Cap at 3 evidence lines per feature. If more exist, show `↳ + N more insights`
+- Only show evidence for features that have `competitor_insight_ids` — features without them display normally with no extra lines
+- Indent evidence lines to align with the feature title (after the priority/complexity prefix)
+
 **When competitor data was used, add this section before the totals:**
 
 ```
@@ -214,6 +233,8 @@ Pipeline: kanban-add --from-roadmap is the next step.
 After displaying the summary above, offer to continue to the next pipeline step.
 
 **If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:kanban-add"` and `args: "--from-roadmap --auto"`. Then stop.
+
+**Note:** When using `--auto` with competitor-enriched roadmaps, web-scraped evidence text flows into task descriptions without manual review. Users should review competitor-informed task descriptions (marked `[C]`) before acting on them.
 
 **Otherwise, present this to the user:**
 
