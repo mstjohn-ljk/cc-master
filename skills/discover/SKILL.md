@@ -221,20 +221,22 @@ Pipeline: roadmap is the next step.
 
 After displaying the summary above, offer to continue to the next pipeline step.
 
-**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:roadmap"` and `args: "--auto"`. Then stop.
+**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:roadmap"` and `args: "--auto"`. Then stop. (Auto mode skips competitor analysis — it's opt-in only.)
 
 **Otherwise, present this to the user:**
 
 > Continue to roadmap?
 >
 > 1. **Yes** — proceed to /cc-master:roadmap
-> 2. **Auto** — run all remaining pipeline steps without pausing
-> 3. **Stop** — end here
+> 2. **Competitors first** — run /cc-master:competitors then roadmap (adds market insights)
+> 3. **Auto** — run all remaining pipeline steps without pausing
+> 4. **Stop** — end here
 
 Then wait for the user's response:
 - "1", "yes", "y": Invoke Skill with `skill: "cc-master:roadmap"`. Stop.
-- "2", "auto", "a": Invoke Skill with `skill: "cc-master:roadmap"`, `args: "--auto"`. Stop.
-- "3", "stop", or anything else: Print "Stopped. Run /cc-master:roadmap when ready." End.
+- "2", "competitors", "c": Invoke Skill with `skill: "cc-master:competitors"`. Stop. (The competitors skill chains to roadmap on its own.)
+- "3", "auto", "a": Invoke Skill with `skill: "cc-master:roadmap"`, `args: "--auto"`. Stop.
+- "4", "stop", or anything else: Print "Stopped. Run /cc-master:roadmap when ready." End.
 
 ## What NOT To Do
 
