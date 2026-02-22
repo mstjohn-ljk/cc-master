@@ -212,6 +212,7 @@ Phase 1: Foundation (3 features)
 - Only show evidence for features that have `competitor_insight_ids` — features without them display normally with no extra lines
 - Indent evidence lines to align with the feature title (after the priority/complexity prefix)
 
+
 **When competitor data was used, add this section before the totals:**
 
 ```
@@ -235,6 +236,7 @@ After displaying the summary above, offer to continue to the next pipeline step.
 **If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:kanban-add"` and `args: "--from-roadmap --auto"`. Then stop.
 
 **Note:** When using `--auto` with competitor-enriched roadmaps, web-scraped evidence text flows into task descriptions without manual review. Users should review competitor-informed task descriptions (marked `[C]`) before acting on them.
+
 
 **Otherwise, present this to the user:**
 
