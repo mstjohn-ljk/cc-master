@@ -214,8 +214,27 @@ Issues Found: <count by severity>
   <critical_count> critical | <high_count> high | <medium_count> medium | <low_count> low
 
 Written to .cc-master/discovery.json
-Next: /cc-master:roadmap to generate a feature roadmap from this discovery.
+Pipeline: roadmap is the next step.
 ```
+
+## Chain Point
+
+After displaying the summary above, offer to continue to the next pipeline step.
+
+**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:roadmap"` and `args: "--auto"`. Then stop.
+
+**Otherwise, present this to the user:**
+
+> Continue to roadmap?
+>
+> 1. **Yes** — proceed to /cc-master:roadmap
+> 2. **Auto** — run all remaining pipeline steps without pausing
+> 3. **Stop** — end here
+
+Then wait for the user's response:
+- "1", "yes", "y": Invoke Skill with `skill: "cc-master:roadmap"`. Stop.
+- "2", "auto", "a": Invoke Skill with `skill: "cc-master:roadmap"`, `args: "--auto"`. Stop.
+- "3", "stop", or anything else: Print "Stopped. Run /cc-master:roadmap when ready." End.
 
 ## What NOT To Do
 

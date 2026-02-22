@@ -15,6 +15,8 @@ The task is specified via arguments:
 - A task ID: `build 3` or `build #3`
 - A spec file: `build .cc-master/specs/add-auth.md`
 
+**If `--auto` is present in arguments**, strip it before parsing (it controls chaining behavior at the end, not task identification). Remember that `--auto` was present for the Chain Point step.
+
 **If task ID:** Call `TaskGet` to load the task. Look for a spec file reference in its description. If no spec exists, suggest running `/cc-master:spec <id>` first and stop.
 
 **If spec file:** Read the spec directly.
@@ -119,7 +121,7 @@ Verification:
   [PASS] npm test
   [PASS] All acceptance criteria addressed
 
-Next: /cc-master:qa-loop to validate quality.
+Pipeline: qa-loop is the next step.
 ```
 
 If verification fails:
@@ -137,6 +139,27 @@ Review the failures and either fix manually or re-run /cc-master:build.
 Update the parent task via `TaskUpdate`:
 - If verification passed: set metadata.phase = "qa" (ready for QA)
 - If verification failed: keep status as `in_progress` with failure notes
+
+### Step 8: Chain Point
+
+**Only execute this step if verification PASSED in Step 6.** If verification failed, skip this entirely.
+
+After displaying the success summary and updating task status, offer to continue to the next pipeline step. The task ID from Step 1 is forwarded.
+
+**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:qa-loop"` and `args: "<task-id> --auto"`. Then stop.
+
+**Otherwise, present this to the user:**
+
+> Continue to qa-loop?
+>
+> 1. **Yes** — proceed to /cc-master:qa-loop <task-id>
+> 2. **Auto** — run all remaining pipeline steps without pausing
+> 3. **Stop** — end here
+
+Then wait for the user's response:
+- "1", "yes", "y": Invoke Skill with `skill: "cc-master:qa-loop"`, `args: "<task-id>"`. Stop.
+- "2", "auto", "a": Invoke Skill with `skill: "cc-master:qa-loop"`, `args: "<task-id> --auto"`. Stop.
+- "3", "stop", or anything else: Print "Stopped. Run /cc-master:qa-loop <task-id> when ready." End.
 
 ## Agent Prompts for Parallel Subtasks
 

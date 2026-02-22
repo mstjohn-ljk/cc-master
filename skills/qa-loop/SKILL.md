@@ -13,6 +13,8 @@ Run the full quality gate cycle: review -> fix -> re-review, looping until the i
 
 Arguments should provide a task ID: `qa-loop 3` or `qa-loop #3`
 
+**If `--auto` is present in arguments**, strip it before parsing (it controls chaining behavior at the end, not task identification). Remember that `--auto` was present for the Chain Point step.
+
 Call `TaskGet` to load the task. Verify:
 - A spec exists at `.cc-master/specs/<task-id>.md`
 - Implementation has been done (files exist, subtasks completed)
@@ -94,8 +96,29 @@ Iteration History:
 Accepted Limitations:
   - [LOW] Unused import in auth.ts — logger used in error path, false positive
 
-Next: /cc-master:complete to merge and close.
+Pipeline: complete is the next step.
 ```
+
+#### Chain Point
+
+**Only execute this on QA PASS (Step 3). Never on escalation (Step 4).**
+
+After displaying the QA passed summary, offer to continue to the next pipeline step. The task ID from Step 1 is forwarded.
+
+**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:complete"` and `args: "<task-id> --auto"`. Then stop.
+
+**Otherwise, present this to the user:**
+
+> Continue to complete?
+>
+> 1. **Yes** — proceed to /cc-master:complete <task-id>
+> 2. **Auto** — run all remaining pipeline steps without pausing
+> 3. **Stop** — end here
+
+Then wait for the user's response:
+- "1", "yes", "y": Invoke Skill with `skill: "cc-master:complete"`, `args: "<task-id>"`. Stop.
+- "2", "auto", "a": Invoke Skill with `skill: "cc-master:complete"`, `args: "<task-id> --auto"`. Stop.
+- "3", "stop", or anything else: Print "Stopped. Run /cc-master:complete <task-id> when ready." End.
 
 ### Step 4: QA Failed — Escalation
 
