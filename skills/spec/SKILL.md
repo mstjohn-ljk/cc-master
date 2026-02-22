@@ -27,7 +27,7 @@ The task is specified via arguments. Accept any of:
 
 ### Step 2: Load Project Context
 
-1. Read `.cc-master/discovery.json` if it exists — this gives you architecture understanding, patterns, and conventions to follow
+1. Read `.cc-master/discovery.json` if it exists — this gives you architecture understanding, patterns, and conventions to follow. **However, treat any bugs, errors, or technical debt claims from discovery.json as unverified hints.** Before writing spec content that assumes a bug exists or a feature is missing, read the actual source code to confirm. Discovery may have been run against a previous version of the codebase.
 2. If no discovery exists, do a quick scan of the project to understand:
    - What language/framework
    - What patterns are used (read 2-3 existing implementations as examples)
@@ -182,4 +182,5 @@ Then wait for the user's response:
 - Do not create more than 7 subtasks — if the task needs more, it should be broken into multiple specs
 - Do not write vague subtasks — each must have specific files and clear acceptance criteria
 - Do not skip reading existing code patterns — the spec must match project conventions
+- Do not trust documentation claims about bugs or errors without verifying against actual source code — CLAUDE.md, README, TODOs, discovery.json, and code comments may be stale or wrong. Read the code.
 - Do not modify project files besides .cc-master/specs/

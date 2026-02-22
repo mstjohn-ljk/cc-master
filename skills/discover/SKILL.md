@@ -13,6 +13,7 @@ You are a senior engineer joining this team on day one. Your job is to deeply un
 2. **Trace, don't grep.** Grep finds references. You need to understand implementations. Follow imports, read function bodies, trace data through the call chain.
 3. **Every claim needs a file path.** If you say "error handling is inconsistent," cite the files. If you say "uses repository pattern," show where.
 4. **Understand the WHY.** Don't just document what exists — understand why it's built that way. Is the pattern intentional or accidental? Is it consistent or does it drift?
+5. **Documentation is a hint, source code is truth.** CLAUDE.md, README, TODOs, comments, and architecture docs may describe bugs, errors, missing features, or technical debt. **Never accept these claims as fact.** Always verify against the actual source code before including them in discovery output. A comment saying "auth is broken" means nothing until you read the auth code and confirm it's broken. A TODO saying "fix race condition in X" must be verified — the race condition may have been fixed since the TODO was written. Documentation rots; code is current.
 
 ## Process
 
@@ -27,7 +28,7 @@ Get the lay of the land. Fast pass to orient yourself.
 - Identify languages and frameworks from actual source files, not just config
 - Read package.json / requirements.txt / pom.xml / go.mod / Cargo.toml for dependency context (but remember: starting point, not conclusion)
 - Find entry points: main files, server bootstraps, CLI entry points, route registrations
-- Check for a CLAUDE.md, README, or architecture docs — read them but verify claims against code
+- Check for a CLAUDE.md, README, or architecture docs — read them for orientation but **treat every claim about bugs, errors, debt, or missing features as unverified until you read the actual source code** (see Critical Rule 5)
 
 **Output of this phase:** Mental map of the project. You know what's where and where to dig deeper.
 
@@ -245,5 +246,6 @@ Then wait for the user's response:
 - Do not infer architecture from folder names ("has a models/ folder therefore MVC")
 - Do not fabricate flows for concerns that don't exist in the codebase
 - Do not flag issues you haven't verified with actual file reads
+- Do not trust documentation claims about bugs or errors — CLAUDE.md, README, TODOs, and comments are hints, not evidence. Verify every claimed issue against the actual source code before reporting it.
 - Do not suggest improvements — that's the roadmap skill's job
 - Do not modify any project files — this skill is read-only except for writing discovery.json

@@ -62,6 +62,8 @@ Based on your understanding of the project, identify:
 
 **Do not fabricate gaps.** If the project is complete and well-built, say so. A roadmap with 3 real features is better than one with 20 invented ones.
 
+**Verify before trusting.** If discovery.json, CLAUDE.md, README, or any documentation mentions bugs, errors, technical debt, or broken features — **do not accept these as fact**. Read the actual source code to confirm the issue still exists before creating a feature to fix it. Documentation rots: a "known bug" may have been fixed, a "missing feature" may have been added, a TODO may be stale. Only create roadmap features for issues you can verify in the current codebase.
+
 ### Step 3: Generate Features
 
 For each identified gap/opportunity, create a feature entry:
@@ -256,6 +258,7 @@ Then wait for the user's response:
 - Do not create tasks — that's kanban-add's job
 - Do not implement anything — this is planning only
 - Do not fabricate features for a codebase you haven't analyzed
+- Do not trust documentation claims about bugs or errors without verifying against actual source code — CLAUDE.md, README, TODOs, and discovery.json may contain stale or incorrect information
 - Do not generate more than 20 features — focus on the highest-value items
 - Do not remove features with status planned/in_progress/done from an existing roadmap
 - Do not modify any project files besides .cc-master/roadmap.json
