@@ -39,6 +39,8 @@ claude plugin add /path/to/cc-master
                                 │
 /cc-master:qa-loop      →  qa-review ↔ qa-fix until passing
                                 │
+/cc-master:qa-ui-review →  browser E2E testing, creates tasks for findings (optional)
+                                │
 /cc-master:complete     →  PR (default) or merge with --merge, update kanban
 ```
 
