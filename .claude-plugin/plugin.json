@@ -8,5 +8,5 @@
   "repository": "https://github.com/mstjohn-ljk/cc-master",
   "homepage": "https://github.com/mstjohn-ljk/cc-master",
   "license": "MIT",
-  "keywords": ["roadmap", "kanban", "insights", "qa", "project-management", "skills", "pipeline", "competitor-analysis"]
+  "keywords": ["roadmap", "kanban", "insights", "qa", "project-management", "skills", "pipeline", "competitor-analysis", "ui-testing", "e2e"]
 }

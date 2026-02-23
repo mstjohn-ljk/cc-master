@@ -79,6 +79,7 @@ Source badge (shown on next line or after title if space permits):
 - `[M]` = manual
 - `[I]` = from insights
 - `[C]` = competitor-informed (shown alongside source badge, not replacing it)
+- `[Q]` = from qa-ui-review
 - No badge if source unknown
 
 A task can have multiple badges — e.g., `[R][C]` means "from roadmap, competitor-informed". The `[C]` badge is shown whenever `competitor_insight_ids` is present and non-empty in the task metadata.
