@@ -2,7 +2,7 @@
 
 Autonomous project management for Claude Code. Roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native.
 
-CC-Master is a Claude Code plugin that adds 12 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
+CC-Master is a Claude Code plugin that adds 13 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
 
 ## Install
 
@@ -39,7 +39,7 @@ claude plugin add /path/to/cc-master
                                 │
 /cc-master:qa-loop      →  qa-review ↔ qa-fix until passing
                                 │
-/cc-master:complete     →  merge, update kanban, optional PR
+/cc-master:complete     →  PR (default) or merge, update kanban
 ```
 
 Each skill is standalone — run any skill independently or chain them for the full pipeline.
@@ -60,7 +60,7 @@ Not a file scanner. Reads the actual auth middleware to tell you it's JWE + HMAC
 
 ### Task Management
 
-**`/cc-master:kanban`** — Text kanban board rendered with box-drawing characters. Tasks show source badges (`[R]` roadmap, `[M]` manual, `[I]` insights) and `[C]` for competitor-informed tasks.
+**`/cc-master:kanban`** — Text kanban board rendered with box-drawing characters. Tasks show source badges (`[R]` roadmap, `[M]` manual, `[I]` insights, `[Q]` qa-ui-review) and `[C]` for competitor-informed tasks.
 
 ```
 ┌──────────────────┬──────────────────┬──────────────────┬──────────────────┐
@@ -93,7 +93,11 @@ Supports `--detail` (expanded list with competitor evidence), `--compact` (one-l
 
 ### Completion
 
-**`/cc-master:complete`** — Merges worktree back after QA passes, updates kanban status, updates roadmap feature status, optionally creates a PR with `--pr`.
+**`/cc-master:complete`** — Creates a PR (default) or merges to main with `--merge` after QA passes. Updates kanban status and roadmap feature status.
+
+### UI Testing
+
+**`/cc-master:qa-ui-review`** — End-to-end UI testing via Playwright browser automation. Exercises user flows, reviews look & feel, accessibility, responsive design, and client-side security against a running application. Creates kanban tasks for every finding. Standalone — runs anytime against any live URL.
 
 ## State Directory
 
@@ -126,7 +130,7 @@ Skills compose through JSON artifacts:
 - `spec` writes spec files → `build` reads them
 - `build` produces code → `qa-review` validates it
 - `qa-fix` fixes findings → `qa-review` re-validates
-- `complete` merges after QA passes
+- `complete` creates a PR (or merges with `--merge`) after QA passes
 
 Each skill works standalone. You can `kanban-add` manual tasks without a roadmap, or run `qa-review` on any code without the full pipeline.
 
@@ -137,7 +141,7 @@ Skills optionally leverage MCP servers for enhanced capabilities:
 | MCP Server | Used By | Purpose |
 |------------|---------|---------|
 | Context7 | discover, insights, spec, qa-review | Live framework documentation |
-| Puppeteer | qa-review, qa-loop | Browser-based E2E validation |
+| Playwright | qa-ui-review | Browser-based E2E UI testing |
 | Linear / GitHub | roadmap | Import existing issues as features |
 | Sequential Thinking | spec, qa-review | Structured multi-step reasoning |
 
@@ -171,7 +175,7 @@ All MCP integrations are optional — skills degrade gracefully without them.
 /cc-master:qa-loop 3
 
 # 9. Merge and close
-/cc-master:complete 3 --pr
+/cc-master:complete 3
 ```
 
 ## License

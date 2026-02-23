@@ -328,15 +328,15 @@ After all tasks have been through qa-loop, collect the results:
 ```
 Invoke the Skill tool with `skill: "cc-master:complete"` and `args: "<passing-id-1>,<passing-id-2>,... --auto"`.
 
-This ensures complete receives the full batch context and can coordinate commit-once/merge-once correctly across the shared worktree.
+This ensures complete receives the full batch context and can coordinate commit-once correctly across the shared worktree. In auto mode, complete defaults to creating a PR (not merging directly to main).
 
 **After complete finishes, print the final batch summary:**
 
 ```
 Batch Complete: batch-3-5-7
 
-  #3 Add user authentication    BUILD pass  QA pass (2 rounds)  COMPLETE pass  merged
-  #5 Setup CI/CD pipeline       BUILD pass  QA pass (1 round)   COMPLETE pass  merged
+  #3 Add user authentication    BUILD pass  QA pass (2 rounds)  COMPLETE pass  PR #42
+  #5 Setup CI/CD pipeline       BUILD pass  QA pass (1 round)   COMPLETE pass  PR #42
   #7 Add structured logging     BUILD fail  (2 criteria unmet — skipped QA/complete)
 
 2/3 tasks completed end-to-end.
@@ -351,7 +351,7 @@ Batch Complete: batch-3-5-7
   #4 Add rate limiting          BUILD pass  QA escalated (5 rounds, score 78)  needs review
 ```
 
-**`--pr` in batch mode:** The `--pr` flag is not supported in multi-task batch mode. If passed, print `"--pr is not supported in batch mode. Run /cc-master:complete <id> --pr individually after the batch completes."` and ignore it. Each task can be PR'd individually after the batch if needed.
+**Completion method in batch mode:** The complete skill defaults to creating a PR in auto mode. If you need to override to direct merge, pass `--merge` explicitly: `complete <ids> --auto --merge`.
 
 ## Agent Prompts for Parallel Subtasks
 
