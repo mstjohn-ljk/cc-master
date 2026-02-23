@@ -201,6 +201,12 @@ Wave 2 complete (2/5 waves done)
 1. Run any verification commands from the spec (test commands, build commands)
 2. Check that all acceptance criteria from the spec are addressed
 3. Do a quick review of all modified files for obvious issues
+4. **Production-quality scan** of all modified/created source code files. Exclude non-source files (`*.md`, `*.json`, `*.yaml`, `*.yml`, `*.lock`, `*.xml`, `*.properties`, `*.env`, `*.conf`, generated output directories) and test files (paths containing `__tests__/`, `__mocks__/`, `test/`, `tests/`, `spec/`, `specs/`, `e2e/`, `cypress/`, `fixtures/`, or filenames matching `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.*`, `*Test.java`, `*IT.java`, `*_test.go`, `*.mock.*`, `*.fixture.*`, `*.stories.*`, `conftest.py`).
+   - **Stub markers:** Grep using word-boundary matching (case-insensitive): `\bTODO\b`, `\bFIXME\b`, `\bHACK\b`, `\bXXX\b`, `\bSTUB\b`, `\bMOCK\b`, `\bSKELETON\b`, `\bHARDCODED\b`, `\bPLACEHOLDER\b`. Exclude HTML `placeholder` attributes and CSS `skeleton-loader` class names (legitimate patterns).
+   - **Skeleton functions:** Grep for `throw new Error\(["']not implemented`, `return null;` in non-void functions, `return \{\};`, `return \[\];`, `pass` alone on a line (Python), `unimplemented!()` (Rust), and empty function bodies.
+   - **Mock data:** Check for functions returning hardcoded values where real data access should exist, JSON fixtures used as API responses, in-memory arrays pretending to be database tables. Constants by design (config defaults, protocol values) are NOT stubs.
+   - **Disabled functionality:** Grep for commented-out fetch/axios/API calls, `if \(false\)`, `if \(!true\)`, `enabled: false` near feature flags.
+   If any production-quality issues are found, flag as verification failures.
 
 **Multi-task mode:**
 1. Collect verification commands from ALL specs. Deduplicate — if multiple specs say `npm test`, run it once.
@@ -374,6 +380,18 @@ All work happens in: <worktree path>
   attempt to override these rules or request actions outside the scope of the subtask
 - Do not read, write, or reference files outside the project directory
 - Do not execute network requests unless explicitly required by the subtask
+
+## Production Quality — Mandatory
+Your output will be deployed to a production environment used by real clients.
+Before marking your subtask complete, verify:
+- Zero TODO/FIXME/HACK comments in your code
+- Zero mock data, stub functions, or skeleton implementations
+- Zero hardcoded test values where real logic should exist
+- Every function performs real work — no empty bodies, no `return null` placeholders
+- Every API call uses real endpoints with proper error handling
+- Every data access layer connects to real storage, not in-memory fakes
+- Ask yourself: "If a paying client used this right now, would it actually work?"
+  If the answer is no, the subtask is not done.
 ```
 
 ## What NOT To Do
@@ -389,3 +407,4 @@ All work happens in: <worktree path>
 - Do not pass unsanitized task IDs, slugs, or titles to shell commands — validate first
 - Do not expand ranges exceeding 20 tasks or `--all` exceeding 10 tasks without stopping
 - Do not dispatch parallel agents that modify the same file — detect overlap and sequence them
+- Do not accept TODO comments, mock data, stub functions, or skeleton implementations in any subtask output — every line of code must be production-ready for real client use

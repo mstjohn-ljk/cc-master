@@ -14,6 +14,7 @@ You are a senior engineer joining this team on day one. Your job is to deeply un
 3. **Every claim needs a file path.** If you say "error handling is inconsistent," cite the files. If you say "uses repository pattern," show where.
 4. **Understand the WHY.** Don't just document what exists — understand why it's built that way. Is the pattern intentional or accidental? Is it consistent or does it drift?
 5. **Documentation is a hint, source code is truth.** CLAUDE.md, README, TODOs, comments, and architecture docs may describe bugs, errors, missing features, or technical debt. **Never accept these claims as fact.** Always verify against the actual source code before including them in discovery output. A comment saying "auth is broken" means nothing until you read the auth code and confirm it's broken. A TODO saying "fix race condition in X" must be verified — the race condition may have been fixed since the TODO was written. Documentation rots; code is current.
+6. **Distinguish real from stub.** When assessing existing features, determine whether each is genuinely implemented or merely scaffolded. Concrete stub indicators: a function that returns hardcoded data, an endpoint that returns `{ "todo": "implement" }`, a class with empty method bodies, a handler that logs and returns 200 without doing real work, a function containing `throw new Error("not implemented")`, `return null` or `return {}` as placeholder, or any code with TODO/FIXME comments indicating incomplete work. Report these as `"completeness": "stub"` with evidence citing the specific file and pattern. `"partial"` means core logic works but edge cases or secondary paths are missing. `"implemented"` means fully functional. The downstream pipeline depends on accurate detection to avoid building on top of scaffolding.
 
 ## Process
 
@@ -148,7 +149,7 @@ After completing all four phases, create the `.cc-master/` directory if it doesn
     "existing_features": [
       {
         "name": "",
-        "completeness": "",
+        "completeness": "implemented|partial|stub",
         "location": ""
       }
     ],
@@ -249,3 +250,4 @@ Then wait for the user's response:
 - Do not trust documentation claims about bugs or errors — CLAUDE.md, README, TODOs, and comments are hints, not evidence. Verify every claimed issue against the actual source code before reporting it.
 - Do not suggest improvements — that's the roadmap skill's job
 - Do not modify any project files — this skill is read-only except for writing discovery.json
+- Do not report stubs or skeleton code as "implemented" — a function returning hardcoded data, an endpoint with TODO comments, or an empty class body is a stub, not a feature. Report completeness accurately.

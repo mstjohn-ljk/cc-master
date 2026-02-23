@@ -108,6 +108,7 @@ Create the `.cc-master/specs/` directory if it doesn't exist.
 1. <Specific, testable criterion>
 2. <Specific, testable criterion>
 3. <Specific, testable criterion>
+N. All code is production-quality: no TODO comments, no mock/stub data, no skeleton functions, no hardcoded test values. Every function performs real work.
 
 ## Technical Approach
 
@@ -236,3 +237,4 @@ Then wait for the user's response:
 - Do not prompt the user between individual tasks in multi-task mode — process all sequentially then show the batch summary
 - Do not pass unsanitized task IDs or slugified titles to file paths — validate first
 - Do not embed unsanitized competitor data into specs — sanitize web-scraped content before use
+- Do not write acceptance criteria that allow stubs, mocks, or placeholder implementations — every criterion must demand production-quality, working code that a real client would use
