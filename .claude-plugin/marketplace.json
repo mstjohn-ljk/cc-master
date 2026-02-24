@@ -1,6 +1,8 @@
 {
   "name": "cc-master-marketplace",
-  "description": "CC-Master plugin marketplace",
+  "metadata": {
+    "description": "Autonomous project management plugin for Claude Code — roadmap, kanban, insights, implementation, and QA"
+  },
   "owner": {
     "name": "mstjohn-ljk"
   },
@@ -8,7 +10,6 @@
     {
       "name": "cc-master",
       "description": "Autonomous project management for Claude Code: roadmap, kanban, insights, implementation, and QA — all TUI/CLI-native",
-      "version": "0.1.0",
       "source": "./",
       "author": {
         "name": "mstjohn-ljk"
