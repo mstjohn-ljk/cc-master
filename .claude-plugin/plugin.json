@@ -1,7 +1,7 @@
 {
   "name": "cc-master",
   "description": "Autonomous project management for Claude Code: roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "author": {
     "name": "mstjohn-ljk"
   },
