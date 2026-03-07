@@ -28,7 +28,7 @@ The task is specified via arguments. Accept any of:
 - A range: `spec 3-7`
 - All kanban tasks without specs: `spec --all`
 
-**If `--auto` is present in arguments**, strip it before parsing (it controls chaining behavior at the end, not task identification). Remember that `--auto` was present for the Chain Point step. Unknown flags other than `--auto` are ignored with a warning.
+**If `--auto` is present in arguments**, strip it before parsing (it controls chaining behavior at the end, not task identification). Remember that `--auto` was present for the Chain Point step. `--all` is also a valid flag (see multi-task mode above). **Reject any other flags** with: `"Unknown flag '<flag>'. Valid flags: --auto, --all."`
 
 **Validate all arguments** against the Input Validation Rules above before any parsing.
 
@@ -217,13 +217,15 @@ After displaying the summary above (or the batch summary for multi-task), offer 
 > Continue to build?
 >
 > 1. **Yes** — proceed to /cc-master:build <task-id(s)>
-> 2. **Auto** — run all remaining pipeline steps without pausing
-> 3. **Stop** — end here
+> 2. **Debate first** — run debate:all to review this plan with multiple AI perspectives, then build
+> 3. **Auto** — run all remaining pipeline steps without pausing
+> 4. **Stop** — end here
 
 Then wait for the user's response:
 - "1", "yes", "y": Invoke Skill with `skill: "cc-master:build"`, `args: "<task-id(s)>"`. Stop.
-- "2", "auto", "a": Invoke Skill with `skill: "cc-master:build"`, `args: "<task-id(s)> --auto"`. Stop.
-- "3", "stop", or anything else: Print "Stopped. Run /cc-master:build <task-id(s)> when ready." End.
+- "2", "debate", "d": Invoke Skill with `skill: "cc-master:build"`, `args: "<task-id(s)> --debate"`. Stop.
+- "3", "auto", "a": Invoke Skill with `skill: "cc-master:build"`, `args: "<task-id(s)> --auto"`. Stop.
+- "4", "stop", or anything else: Print "Stopped. Run /cc-master:build <task-id(s)> when ready." End.
 
 ## What NOT To Do
 

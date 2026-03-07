@@ -5,7 +5,24 @@ description: Implement spec'd tasks. Creates git worktree for isolation, dispatc
 
 # cc-master:build — Implementation
 
-Implement spec'd tasks by executing subtasks in dependency order. Uses git worktrees for isolation and dispatches parallel agents for independent subtasks. Supports single-task and multi-task (batch) modes.
+## Coordinator Role — Non-Negotiable
+
+**You are the coordinator. You do NOT write code. You do NOT edit files. You do NOT implement subtasks yourself.**
+
+Your only jobs are:
+1. Read specs and understand what needs to be built
+2. Create the worktree and plan execution waves
+3. Dispatch agents via the Agent tool for EVERY subtask — no exceptions
+4. Wait for agents to complete and collect their results
+5. Verify output and run the post-build checks
+
+**Every subtask — regardless of size, regardless of how trivial — MUST be dispatched as an Agent.** A subtask that "only changes one line" still goes to an agent. A subtask that "just adds a config entry" still goes to an agent. There are no exceptions to this rule. If you find yourself writing code, editing a file, or implementing anything directly, STOP — you are violating the coordinator role.
+
+This is enforced because: the coordinator session must remain focused on orchestration. Inline implementation pollutes the coordinator context, causes drift from the wave plan, and bypasses the self-review checklist that agents are required to run.
+
+---
+
+Implement spec'd tasks by dispatching subtasks to agents in dependency waves. Uses git worktrees for isolation. Supports single task, comma-separated IDs, ranges, or --all for batch autonomous execution.
 
 ## Input Validation Rules
 
@@ -30,16 +47,17 @@ The task is specified via arguments:
 **Argument parsing order:**
 
 1. **Strip `--auto` flag first** (existing behavior). Remember that `--auto` was present for the Chain Point step.
-2. **Validate all IDs** against the Input Validation Rules above. Reject invalid input immediately.
-3. **Detect multi-task mode:**
+2. **Strip `--debate` flag** if present. Remember that `--debate` was present — it triggers plan review before any implementation begins (see Step 1b). `--debate` requires the `debate` plugin to be installed; if not available, print a warning and continue without debating.
+3. **Validate all IDs** against the Input Validation Rules above. Reject invalid input immediately.
+4. **Detect multi-task mode:**
    - If `--all`: Glob `.cc-master/specs/*.md` (excluding `*-review.json`), extract task IDs from filenames. If none found, print `No spec files found in .cc-master/specs/. Run /cc-master:spec first.` and stop. **Batch size limit:** If `--all` resolves to more than 10 tasks, print `"Found N tasks. Batch builds are most reliable with 10 or fewer tasks. Specify a subset with build 3,5,7 or build 3-7."` and stop.
    - If argument contains `-` between two numbers (e.g., `3-7`): validate range, expand to individual IDs (3, 4, 5, 6, 7). Call `TaskGet` for each. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
    - If argument contains `,` (e.g., `3,5,7`): parse into individual IDs, sort numerically. Call `TaskGet` for each. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
    - If argument is a file path (e.g., `build .cc-master/specs/add-auth.md`): verify the normalized path (with `..`, `.`, and symlinks resolved) starts with `.cc-master/specs/` and ends with `.md`. Reject paths that escape this prefix.
    - Otherwise: single task ID — existing single-task behavior (unchanged).
-4. **Single-task fallback:** If multi-task argument parsing resolves to exactly 1 task, fall back to single-task mode (preserving normal chain-point prompting). Print: `"1 task resolved — running in single-task mode."`
-5. **For multi-task mode:** if ANY task lacks a spec file, print which ones are missing and stop. Do not partial-build.
-6. **Multi-task implies `--auto`** — set the auto flag internally regardless of whether the user passed it. The whole point of multi-task is autonomous execution.
+5. **Single-task fallback:** If multi-task argument parsing resolves to exactly 1 task, fall back to single-task mode (preserving normal chain-point prompting). Print: `"1 task resolved — running in single-task mode."`
+6. **For multi-task mode:** if ANY task lacks a spec file, print which ones are missing and stop. Do not partial-build.
+7. **Multi-task implies `--auto`** — set the auto flag internally regardless of whether the user passed it. The whole point of multi-task is autonomous execution.
 
 **Print the resolved task list (multi-task only):**
 ```
@@ -50,6 +68,30 @@ Build targets (3 tasks, autonomous mode):
 ```
 
 **Single-task mode:** Same as before — call `TaskGet` to load the task, look for a spec file reference. If no spec exists, suggest running `/cc-master:spec <id>` first and stop.
+
+### Step 1b: Debate Review (if --debate flag present)
+
+**Only execute this step if `--debate` was present in the arguments.**
+
+Before any implementation begins, submit the spec(s) to `debate:all` for multi-AI review. This catches design flaws, missing edge cases, and incorrect assumptions before they get baked into code.
+
+1. Read each spec file from `.cc-master/specs/<task-id>.md`
+2. Print:
+   ```
+   --debate flag detected. Submitting spec(s) to debate:all before building...
+   ```
+3. Invoke the Skill tool with `skill: "debate:all"`. The spec content serves as the plan to debate.
+4. Wait for debate:all to complete and produce a consensus review.
+5. If the debate produces a consensus **APPROVE**: proceed to Step 2.
+6. If the debate produces a consensus **REQUEST_CHANGES** or **CONCERNS**: print the concerns and ask:
+   ```
+   Debate reviewers raised concerns. Proceed anyway or stop to revise the spec?
+   1. Proceed — build with current spec
+   2. Stop — revise spec first (run /cc-master:spec <id> to update)
+   ```
+   Wait for user response. "1" or "proceed": continue to Step 2. "2", "stop", or anything else: print "Stopped. Update the spec and re-run /cc-master:build <id> --debate." End.
+
+**In `--auto` mode with `--debate`:** If debate produces concerns, print them and automatically stop (do not proceed). Print: `"Stopped — debate raised concerns. Revise the spec with /cc-master:spec <id>, then re-run /cc-master:build <id> --debate."` Auto mode should not override human-intended design reviews.
 
 ### Step 2: Read Specs and Collect Subtasks
 
@@ -165,25 +207,25 @@ Starting wave 1...
 
 ### Step 5: Execute Waves
 
+**For EVERY wave, dispatch ALL subtasks as agents.** There is no inline execution path. Single subtask in a wave = one agent. Four subtasks in a wave = four agents in parallel. Zero exceptions.
+
 For each wave:
 
-**If the wave has a single subtask:**
-- Execute it directly in the current session
-- Read the files specified in the subtask
-- Implement the changes following the pattern reference from the spec
-- Mark subtask as `completed` via `TaskUpdate`
+**Dispatch every subtask as an Agent via the Agent tool.** Each agent gets a self-contained prompt (see Agent Prompts section below) including:
+- The subtask description and acceptance criteria
+- The spec file content (or relevant section)
+- The project discovery context (if available)
+- The pattern reference to follow
+- The worktree path to work in
+- Explicit file paths to modify/create
 
-**If the wave has multiple independent subtasks:**
-- Dispatch each subtask as a parallel agent via the `Task` tool
-- Each agent gets a self-contained prompt including:
-  - The subtask description and acceptance criteria
-  - The spec file content (or relevant section)
-  - The project discovery context (if available)
-  - The pattern reference to follow
-  - The worktree path to work in
-  - Explicit file paths to modify/create
-- Wait for all agents in the wave to complete
-- Verify their work: read the modified files, check for conflicts
+**For a wave with multiple subtasks:** launch all agents in a single message as parallel Agent tool calls. Do not launch them sequentially.
+
+**For a wave with a single subtask:** launch one Agent tool call. Do not implement it yourself.
+
+**Wait for all agents in the wave to complete before starting the next wave.**
+
+After each wave, verify agent output: read the modified files, check for conflicts, confirm the self-review summary is present in the agent's response.
 
 **After each wave:**
 - Mark completed subtasks via `TaskUpdate` (status: `completed`)
@@ -379,6 +421,50 @@ Read <pattern reference path> and follow the same structure, naming, and convent
 ## Working Directory
 All work happens in: <worktree path>
 
+---
+
+## BEFORE YOU WRITE A SINGLE LINE OF CODE — MANDATORY
+
+You MUST complete Phase 1 and Phase 2 before touching any file.
+
+### Phase 1: Restate the Task
+
+In your own words — NOT copying the description above — write out:
+1. What you are building (1-2 sentences)
+2. What done looks like (map each acceptance criterion to a concrete observable outcome)
+3. What files you will change and why each one needs to change
+
+Do this now, before reading any code.
+
+### Phase 2: Research and Readiness Check
+
+Read every file you will need to understand before implementing:
+- The files listed under "Files to Modify/Create" above
+- The pattern reference file listed under "Pattern to Follow"
+- Any files those files import or depend on that are relevant to your change
+- Any test files for the code you are changing
+
+After reading, explicitly answer these questions:
+1. Do I understand the existing code well enough to change it without breaking it?
+2. Do I know exactly where in each file my changes go?
+3. Do I understand the pattern I need to follow?
+4. Are there any edge cases in the acceptance criteria I don't know how to handle yet?
+5. Is there anything about this task I'm uncertain about?
+
+**If the answer to question 5 is yes, or if any of questions 1-4 is no:**
+- Identify exactly what you are missing
+- Read additional files to close the gap
+- Repeat the readiness check until all answers are yes
+- Do NOT proceed to implementation with unresolved uncertainty — a wrong implementation is worse than a slow one
+
+**Only when all five questions are answered yes do you proceed to Phase 3.**
+
+### Phase 3: Implement
+
+Now implement. You have grounded yourself in the task and the codebase. Do not drift from what you stated in Phase 1.
+
+---
+
 ## Rules
 - Only modify the files listed above unless you discover a necessary related change
 - Follow existing project conventions exactly
@@ -403,10 +489,41 @@ Before marking your subtask complete, verify:
 - Every data access layer connects to real storage, not in-memory fakes
 - Ask yourself: "If a paying client used this right now, would it actually work?"
   If the answer is no, the subtask is not done.
+
+## Self-Review Before Marking Complete — Mandatory
+
+Before you mark your subtask complete, you MUST perform this self-review. Do not skip it. Do not report complete until every item passes.
+
+**Step A — Re-read every file you modified or created.** Not a skim — read the full function bodies.
+
+**Step B — Check acceptance criteria.** For each acceptance criterion listed in your subtask:
+- Trace the code path that satisfies it. Can you point to specific lines?
+- If you cannot trace it, it is not implemented.
+
+**Step C — Check for misalignment with the original task.** Read your subtask description again, then read your code. Ask: does this code do what was asked, or something adjacent to it? Common drift patterns:
+- Implementing the happy path but not the stated constraint (e.g., "must validate email format" but you validate only that it's non-empty)
+- Implementing a slightly different API shape than specified (different field names, different HTTP method)
+- Solving a related but different problem than described
+
+**Step D — Security spot-check on your changes:**
+- Any user input that reaches a database query? Is it parameterized?
+- Any user input that reaches a file path? Is it validated and contained?
+- Any auth check that should be present on this code path?
+
+**Step E — Report your self-review.** When you report your subtask complete, include a one-paragraph self-review summary:
+```
+Self-review: I implemented [what]. I verified [specific criteria] by [how].
+I found no stub/mock code. The implementation handles [edge cases].
+[If you found and fixed something: "I caught and fixed [issue] during self-review."]
+```
+
+If any Step A-D item fails, fix it before reporting complete. Do not report issues you cannot fix — escalate instead.
 ```
 
 ## What NOT To Do
 
+- **Do not implement anything yourself.** You are the coordinator. If you are writing code, editing a file, or running implementation commands, stop immediately and dispatch an agent instead.
+- **Do not treat a single-subtask wave as an exception to agent dispatch.** One subtask = one agent. Always.
 - Do not implement without a spec — if no spec exists, direct to /cc-master:spec
 - Do not work in the main working tree — always use a worktree
 - Do not implement subtasks out of dependency order
