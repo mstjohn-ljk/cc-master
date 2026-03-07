@@ -32,6 +32,7 @@ These rules apply to ALL argument parsing across this skill:
 - **Task slugs must be safe for shell commands** — matching `^[a-z0-9][a-z0-9-]{0,60}[a-z0-9]$`. Slugification: lowercase, replace non-alphanumeric with hyphens, collapse consecutive hyphens, truncate to 60 chars, strip leading/trailing hyphens. Reject slugs containing path separators or null bytes. If a title produces a slug that fails validation after sanitization, fall back to `task-<id>` (or `task-untitled` if no ID). Never pass unsanitized slugs to Bash commands.
 - **Path containment:** After constructing any worktree path, verify the normalized path (with `..`, `.`, and symlinks resolved) starts with the project root's `.cc-master/worktrees/` prefix. Verify that `.cc-master/worktrees/` exists as a regular directory (not a symlink) before creating it. If the path escapes the prefix, reject with: `"Worktree path escapes .cc-master/worktrees/ — rejected."`
 - **Range validation:** For ranges like `3-7`, the first number must be less than or equal to the second. Reject reversed ranges (`7-3`). Reject ranges exceeding 20 tasks — print `"Range expands to N tasks (max 20). Use a smaller range or comma-separated IDs."` and stop.
+- **`--inline` flag:** No value required. When present: skips worktree creation and executes all subtasks via a single agent on the current branch. Not compatible with multi-task mode (comma-separated IDs, ranges, `--all`) or `--auto`. Strip before other argument validation and remember for routing throughout the skill.
 
 ## Process
 
@@ -48,16 +49,20 @@ The task is specified via arguments:
 
 1. **Strip `--auto` flag first** (existing behavior). Remember that `--auto` was present for the Chain Point step.
 2. **Strip `--debate` flag** if present. Remember that `--debate` was present — it triggers plan review before any implementation begins (see Step 1b). `--debate` requires the `debate` plugin to be installed; if not available, print a warning and continue without debating.
-3. **Validate all IDs** against the Input Validation Rules above. Reject invalid input immediately.
-4. **Detect multi-task mode:**
+3. **Strip `--inline` flag** if present. Remember that `--inline` was present for routing in subsequent steps.
+4. **If `--inline` is present, validate compatibility:**
+   a. If the argument contains `,`, `-` (range), or equals `--all`: print `"--inline is not compatible with multi-task mode. Use a single task ID."` and stop.
+   b. If `--auto` was present: print `"--inline requires explicit human confirmation and cannot be combined with --auto."` and stop.
+5. **Validate all IDs** against the Input Validation Rules above. Reject invalid input immediately.
+6. **Detect multi-task mode:**
    - If `--all`: Glob `.cc-master/specs/*.md` (excluding `*-review.json`), extract task IDs from filenames. If none found, print `No spec files found in .cc-master/specs/. Run /cc-master:spec first.` and stop. **Batch size limit:** If `--all` resolves to more than 10 tasks, print `"Found N tasks. Batch builds are most reliable with 10 or fewer tasks. Specify a subset with build 3,5,7 or build 3-7."` and stop.
    - If argument contains `-` between two numbers (e.g., `3-7`): validate range, expand to individual IDs (3, 4, 5, 6, 7). Call `TaskGet` for each. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
    - If argument contains `,` (e.g., `3,5,7`): parse into individual IDs, sort numerically. Call `TaskGet` for each. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
    - If argument is a file path (e.g., `build .cc-master/specs/add-auth.md`): verify the normalized path (with `..`, `.`, and symlinks resolved) starts with `.cc-master/specs/` and ends with `.md`. Reject paths that escape this prefix.
    - Otherwise: single task ID — existing single-task behavior (unchanged).
-5. **Single-task fallback:** If multi-task argument parsing resolves to exactly 1 task, fall back to single-task mode (preserving normal chain-point prompting). Print: `"1 task resolved — running in single-task mode."`
-6. **For multi-task mode:** if ANY task lacks a spec file, print which ones are missing and stop. Do not partial-build.
-7. **Multi-task implies `--auto`** — set the auto flag internally regardless of whether the user passed it. The whole point of multi-task is autonomous execution.
+7. **Single-task fallback:** If multi-task argument parsing resolves to exactly 1 task, fall back to single-task mode (preserving normal chain-point prompting). Print: `"1 task resolved — running in single-task mode."`
+8. **For multi-task mode:** if ANY task lacks a spec file, print which ones are missing and stop. Do not partial-build.
+9. **Multi-task implies `--auto`** — set the auto flag internally regardless of whether the user passed it. The whole point of multi-task is autonomous execution.
 
 **Print the resolved task list (multi-task only):**
 ```
@@ -108,7 +113,19 @@ Before any implementation begins, submit the spec(s) to `debate:all` for multi-A
 4. Verify all subtasks have clear assignments
 5. If any task has no subtasks, suggest running `/cc-master:spec <id>` for that task first and stop
 
+### Step 2b: Inline Confirmation (inline mode only)
+
+**Only execute this step if `--inline` was present in arguments.**
+
+Before any file modification can occur, print the following (first determine the current branch with `git branch --show-current`):
+
+> `This will modify files on your current branch (<branch-name>) directly — no worktree isolation. Continue? [y/N]`
+
+Wait for user input. Only proceed if the user enters `y` or `yes` (case-insensitive, with or without spaces). Any other input including pressing Enter alone: print `"Aborted. Run build <id> without --inline to use an isolated worktree instead."` and stop.
+
 ### Step 3: Create Worktree
+
+**If `--inline` was present:** Skip this step entirely. No worktree is created. The agent dispatched in Step 5 will work directly in the project root on the current branch. Continue to Step 4.
 
 **Single task (unchanged):** `.cc-master/worktrees/<task-slug>` with branch `cc-master/<task-slug>`. Validate the slug against the Input Validation Rules before using in any command.
 
@@ -208,6 +225,14 @@ Starting wave 1...
 ### Step 5: Execute Waves
 
 **For EVERY wave, dispatch ALL subtasks as agents.** There is no inline execution path. Single subtask in a wave = one agent. Four subtasks in a wave = four agents in parallel. Zero exceptions.
+
+**Inline mode (if `--inline` was present):** Do NOT use parallel waves. Dispatch ONE agent for ALL subtasks from ALL waves. The agent receives: (a) the full spec content, (b) the complete subtask list in dependency order, (c) instructions to execute subtasks sequentially without parallelism, (d) the project root as the working directory. This single-agent receives the same self-contained prompt format as normal agents plus: "Execute all subtasks sequentially in the order listed. You are working directly on the current branch — no worktree."
+
+**Inline scope guard (run after the single agent completes):** Run `git diff --name-only HEAD` to list modified files. Count the files. If count > 5: print:
+`"WARNING: --inline mode modified <N> files. Consider using the full worktree build (without --inline) for changes of this scope where isolation is important."`
+This is a warning only — it does not fail the build or block progression to verification.
+
+After the scope guard, continue to Step 6 (verification) as normal.
 
 For each wave:
 
