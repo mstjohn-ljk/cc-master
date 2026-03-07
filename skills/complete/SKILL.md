@@ -1,6 +1,6 @@
 ---
 name: complete
-description: Close tasks after QA passes. Creates a PR (default) or merges to main with explicit --merge flag. Updates kanban status and roadmap feature status. Supports single task or comma-separated IDs for batch completion. The last mile.
+description: Close tasks after QA passes. Creates a PR (default) or merges to main with explicit --merge flag. Updates kanban status and roadmap feature status. Supports single task or comma-separated IDs for batch completion. Optionally runs a deploy script and health check after merge. The last mile.
 ---
 
 # cc-master:complete — Task Completion
@@ -12,6 +12,9 @@ Create a PR (default) or merge to main (with explicit `--merge`), close tasks on
 - **Task IDs must be positive integers only** — matching `^[0-9]+$`. Reject any argument containing path separators (`/`, `\`, `..`), shell metacharacters, or non-numeric characters (except commas for multi-task).
 - **Branch names (from `--target`) must be safe** — matching `^[a-zA-Z0-9._/-]+$`. Reject values containing spaces, semicolons, backticks, dollar signs, or other shell metacharacters.
 - **Range syntax (`3-7`) and `--all` are NOT supported by complete.** If a range is detected, print: `"Range syntax is only supported by /cc-master:build. Use comma-separated IDs: complete 3,4,5,6,7"` and stop.
+- **`--deploy <script>` path validation:** After resolving the path (follow symlinks, resolve `..`), verify the resolved absolute path starts with the project root. Verify it is a regular file (not a directory, not a symlink). Verify the first line of the file is a shell shebang: `#!/bin/sh`, `#!/bin/bash`, `#!/usr/bin/env bash`, or `#!/usr/bin/env sh`. If any check fails: print the specific failure and stop. Do NOT execute scripts that fail validation.
+- **`--health-check <url>` URL validation:** Must match `^https?://[a-zA-Z0-9][a-zA-Z0-9._:/?#&=%~+@!,'-]*$`. SSRF prevention: reject if host resolves to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC1918), `127.0.0.0/8` or `::1` (loopback), `169.254.0.0/16` (link-local), `169.254.169.254` (AWS metadata). Also reject: `localhost`, `0.0.0.0`.
+- Both `--deploy` and `--health-check` are recognized alongside existing `--pr`, `--merge`, `--target`, `--auto`. No other new flags added. Reject any unrecognized flags with an error message listing the valid flags.
 
 ## Process
 
@@ -174,6 +177,35 @@ Print the PR URL when done.
   - For earlier tasks in the batch, skip merge (it happens on the last one).
 - **PR (default or `--pr`):** Push the shared branch and create a single PR on the **last task** being processed. The PR title lists all task titles. The PR body includes a summary section for each task with its QA score and acceptance criteria status.
 
+### Step 4b: Deploy (Optional)
+
+**Deploy config detection:** Before executing, check for deploy configuration in this order:
+1. If `--deploy <script>` flag was passed, use that script path
+2. Else if `.cc-master/deploy.sh` exists as a regular file (not symlink), use it
+3. Else: skip this step entirely with no output and proceed to Step 5
+
+**Script path validation (mandatory before any execution):**
+1. Resolve the full path (follow symlinks, resolve any `..` components)
+2. Verify the resolved absolute path starts with the project root
+3. Verify it is a regular file (not a directory, not a device file, not a symlink)
+4. Read the first line — verify it is a shell shebang: `#!/bin/sh`, `#!/bin/bash`, `#!/usr/bin/env bash`, or `#!/usr/bin/env sh`
+5. If any check fails: print `"Deploy script validation failed: <specific reason>."` and stop. Do NOT execute.
+
+**Execute the deploy script:**
+- Print: `"Running deployment: <script-path>"`
+- Execute: `bash <script-path>` with NO additional arguments. Never pass any user-supplied input as arguments to the script.
+- Stream stdout and stderr in real-time (do not buffer output)
+- On exit code 0: print `"Deployment succeeded."`
+- On non-zero exit code: print `"Deployment failed (exit <code>). Review output above."` — this is a **WARNING only, not a fatal error**. The merge/PR in Step 4 already succeeded. Deploy failure does not retroactively fail the task or undo the merge.
+
+**Health check (only if `--health-check <url>` provided AND deploy exited 0):**
+- Validate URL per Input Validation Rules (SSRF prevention)
+- Poll the URL with GET request: retry up to 5 times, wait 10 seconds between retries
+- HTTP 200-299 received: print `"Health check passed: <url>"`
+- Never successful after 5 retries: print `"Health check failed after 5 attempts. Verify deployment manually."` — WARNING only, not fatal
+
+**Batch mode note:** In multi-task batch mode, Step 4 (merge/PR) only runs on the last task. Step 4b is naturally positioned after Step 4, so deploy also runs once — after the batch merge/PR, not per task.
+
 ### Step 5: Clean Up Worktree
 
 After successful merge or PR creation:
@@ -218,6 +250,9 @@ Task Complete: Add user authentication
   QA Score:  95/100 (2 iterations)
   Files:     6 modified, 5 new
 
+  Deploy:    succeeded (or: failed — see output above) (or: skipped — no deploy config)
+  Health:    passed (or: failed after 5 attempts) (or: skipped — no --health-check)
+
   Roadmap:   feat-1 "Add user authentication" -> done
 
 Run /cc-master:kanban to see the updated board.
@@ -240,6 +275,9 @@ Batch Complete: batch-3-5-7
 Method: PR #42 created (or: merged to main with --merge)
 Branch: cc-master/batch-3-5-7
 
+Deploy:    succeeded (or: failed — see output above) (or: skipped — no deploy config)
+Health:    passed (or: failed after 5 attempts) (or: skipped — no --health-check)
+
 Roadmap updates:
   feat-1 "Add user authentication" -> done
   feat-3 "Setup CI/CD pipeline" -> done
@@ -260,3 +298,8 @@ Run /cc-master:kanban to see the updated board.
 - Do not pass unsanitized task IDs, titles, or branch names to shell commands — validate first
 - Do not merge directly to main without explicit user approval — always default to PR or ask the user
 - Do not assume `--auto` means merge — auto mode defaults to PR
+- Do not execute a deploy script that fails path validation — validate before every execution
+- Do not pass any user-supplied input as arguments to the deploy script
+- Do not treat deploy failure as a reason to undo or retroactively fail the merge/PR
+- Do not execute the health-check URL before completing SSRF validation
+- Do not buffer deploy script output — stream it in real-time so the user can see progress
