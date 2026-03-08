@@ -125,45 +125,39 @@ Get the lay of the land. Fast pass to orient yourself.
 
 ### Phase 2: Execution Path Tracing
 
-This is the core of discover. Follow the actual code paths.
+This is the core of discover. Follow the actual code paths starting from endpoints — the way a human engineer would read a new codebase on day one.
 
-**For each major concern, trace the full flow:**
+**Do NOT work from a checklist of concerns.** There is no predefined list of things to look for. You follow the code wherever it leads and document what you find. The codebase tells you what matters, not a template.
 
-**Authentication & Authorization:**
-- Find where auth middleware/interceptors are registered
-- Read the middleware — what does it actually check? Tokens? Signatures? Sessions? API keys?
-- Trace token creation: what library? what algorithm? what's in the payload?
-- Trace token validation: what's verified? expiry? signature? issuer?
-- Trace the refresh flow: does it exist? what gets re-issued?
-- What's the role/permission model? RBAC? Scopes? Claims?
-- File paths for each piece of the chain
+**Method — endpoint-driven traversal:**
 
-**Data Access:**
-- Find where database connections are configured
-- Read the actual query patterns — ORM? Raw SQL? Query builder?
-- Trace a write path: API handler -> service -> repository -> DB
-- Trace a read path: DB -> repository -> service -> handler -> response
-- What's the transaction pattern? Manual? Decorator? Framework-managed?
-- Are there migrations? What tool? Are they in sync with the models?
+1. **Start from the entry points found in Phase 1.** These are your roots — HTTP route registrations, CLI command handlers, event listeners, bootstrap files, scheduled job definitions.
 
-**API Layer:**
-- Read route/endpoint definitions AND their handler implementations
-- What's the request validation approach? Schema validation? Manual checks? Decorator-based?
-- What's the response format? Consistent envelope? Ad-hoc? Error format?
-- What middleware chain do requests pass through?
-- Are there API versioning patterns?
+2. **For each entry point, enumerate its endpoints/routes.** Read the actual route definitions — every `@Path`, `@GetMapping`, `router.get()`, `@app.route`, or equivalent. These are the starting nodes.
 
-**Configuration & Environment:**
-- How does config actually get loaded? (Trace from bootstrap, don't guess)
-- What resolves env vars? Raw process.env? Config library? Secrets manager?
-- What's the config hierarchy? Defaults -> file -> env var -> CLI arg?
-- Are there different configs per environment?
+3. **Follow each endpoint to its terminus.** Read the handler. What does it call? Follow that call. What does THAT call? Keep going until you hit a terminal: a database query, an external API call, a filesystem operation, a message queue publish, a response return with no further side effects. Document the full chain with file paths at each step.
 
-**Background Jobs / Workers / Events:**
-- Are there queue consumers, cron jobs, event handlers, or websocket listeners?
-- Trace at least one background job from trigger to completion
+4. **When a path branches, follow EVERY branch.** If a handler calls service A under one condition and service B under another, trace both. If billing routes to Stripe for one customer type and Authorize.net for another, trace both paths. Conditional logic, feature flags, strategy patterns, provider routing — each branch is a separate flow to document. Never stop at the first implementation you find when the code has multiple paths.
 
-**Only trace concerns that actually exist in the codebase.** If there's no auth, skip auth. If there's no background processing, skip it. Don't fabricate flows.
+5. **When a path crosses service boundaries, keep following.** If service A makes an HTTP call to service B, go read service B's handler for that endpoint. If a message is published to a queue, find the consumer. The trace doesn't stop at a network call — it stops at the terminal operation on the other side.
+
+6. **When you encounter middleware, interceptors, or filters in the chain, trace those too.** Auth middleware, request signing, rate limiting, logging — these are part of the flow. Read what they do, document them in the chain, then continue to the handler.
+
+7. **After tracing all endpoints, check for non-endpoint entry points.** Scheduled jobs, event listeners, queue consumers, startup hooks, migration runners. Trace these the same way — follow the code to its terminus.
+
+**What to document at each step in a flow:**
+- The file path and method/function name
+- What it does (one line — not a description of every line of code)
+- What it calls next (the next step in the chain)
+- Any branching conditions (what determines which path is taken)
+- External integrations encountered (which provider, what protocol, what credentials)
+- Database operations (which tables, read or write, what query pattern)
+
+**Completeness check — before moving to Phase 3, verify:**
+- Every route/endpoint found in step 2 has been traced to at least one terminus
+- Every service-to-service call has been followed into the target service
+- Every conditional branch in a traced flow has been followed separately
+- If a service directory exists that no traced flow entered, investigate why — it may have entry points you missed in Phase 1
 
 ### Phase 3: Pattern Identification
 
@@ -276,8 +270,8 @@ After completing all four phases, create the `.cc-master/` directory if it doesn
 
 **Schema notes:**
 
-- `architecture.key_flows` is a dynamic object. Keys are the concern names (e.g., "authentication", "data_access", "api_layer"). Each value has: `summary`, `implementation` (file paths), `details`, and any concern-specific fields.
-- `existing_features` should list what the project actually does today, with completeness assessment and file locations.
+- `architecture.key_flows` is a dynamic object. Keys are descriptive names derived from what you actually traced — NOT predefined concern categories. Use names that reflect the real flow (e.g., "domain_registration_via_epp", "registrar_billing_stripe", "wallet_topup_authorize_net", "user_login_hmac", "auto_renewal_scheduler"). Each value has: `summary`, `implementation` (file paths showing the full call chain in order), `details`, and any flow-specific fields. If a single concern has multiple paths (e.g., billing routes to two different providers), create separate key_flow entries for each path.
+- `existing_features` should list what the project actually does today, with completeness assessment and file locations. Features should be granular enough to reflect distinct code paths — "Billing via Stripe (registrar accounts)" and "Billing via Authorize.net (wallet top-up)" are two separate features, not one "Billing" entry. If you traced two different paths for the same capability, they are two features.
 - `technical_debt` items must have evidence citing specific files and patterns.
 - `target_audience` and `product_vision` are inferred from the codebase purpose. If unclear, say so honestly rather than fabricating.
 - Set `discovered_at` to the current ISO-8601 timestamp.
