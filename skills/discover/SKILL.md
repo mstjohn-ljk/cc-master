@@ -157,11 +157,12 @@ This is the core of discover. Follow the actual code paths starting from endpoin
 - Every route/endpoint found in step 2 has been traced to at least one terminus
 - Every service-to-service call has been followed into the target service
 - Every conditional branch in a traced flow has been followed separately
-- If a service directory exists that no traced flow entered, investigate why — it may have entry points you missed in Phase 1
+
+**Scope boundary — directories not reached by any traced flow are OUT OF SCOPE.** If a directory exists in the project tree but no endpoint, no service call, no import, and no build config references it, it is not part of the active project. It may be legacy code, a vendored reference, a deprecated module, or something intentionally excluded. Do not report on it, do not flag it as missing from CI, do not include it in existing_features, do not flag it as a gap. Only code reachable from a traced entry point is part of the project. If you are unsure whether an unreachable directory is intentionally excluded or accidentally orphaned, note it in a separate `"unreachable_directories"` list in the output with the directory path and a one-line note — but do NOT flag it as a problem or include it in technical_debt.
 
 ### Phase 3: Pattern Identification
 
-Now that you've read the code, identify the real patterns.
+Now that you've read the code, identify the real patterns. **Only analyze code that was reached during Phase 2 tracing.** Unreachable directories and files are out of scope for pattern analysis.
 
 **Error handling:**
 - Is there a global error handler? Where is it registered?
@@ -187,7 +188,7 @@ Now that you've read the code, identify the real patterns.
 
 ### Phase 4: Gap & Debt Analysis
 
-Based on your deep understanding from phases 2-3, identify real issues.
+Based on your deep understanding from phases 2-3, identify real issues. **Only flag issues in code that was reached during Phase 2 tracing.** Do not flag unreachable directories for missing tests, missing CI integration, or any other gap — they are out of scope.
 
 **Only flag things you can prove:**
 - Missing error handling: "handler X at path Y has no try/catch and no global handler covers it"
