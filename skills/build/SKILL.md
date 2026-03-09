@@ -24,6 +24,18 @@ This is enforced because: the coordinator session must remain focused on orchest
 
 Implement spec'd tasks by dispatching subtasks to agents in dependency waves. Uses git worktrees for isolation. Supports single task, comma-separated IDs, ranges, or --all for batch autonomous execution.
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Find subtasks:** Filter `tasks` where `metadata.parent_id == <parent id>`.
+
 ## Input Validation Rules
 
 These rules apply to ALL argument parsing across this skill:
@@ -56,8 +68,8 @@ The task is specified via arguments:
 5. **Validate all IDs** against the Input Validation Rules above. Reject invalid input immediately.
 6. **Detect multi-task mode:**
    - If `--all`: Glob `.cc-master/specs/*.md` (excluding `*-review.json`), extract task IDs from filenames. If none found, print `No spec files found in .cc-master/specs/. Run /cc-master:spec first.` and stop. **Batch size limit:** If `--all` resolves to more than 10 tasks, print `"Found N tasks. Batch builds are most reliable with 10 or fewer tasks. Specify a subset with build 3,5,7 or build 3-7."` and stop.
-   - If argument contains `-` between two numbers (e.g., `3-7`): validate range, expand to individual IDs (3, 4, 5, 6, 7). Call `TaskGet` for each. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
-   - If argument contains `,` (e.g., `3,5,7`): parse into individual IDs, sort numerically. Call `TaskGet` for each. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
+   - If argument contains `-` between two numbers (e.g., `3-7`): validate range, expand to individual IDs (3, 4, 5, 6, 7). Find each task by id in kanban.json. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
+   - If argument contains `,` (e.g., `3,5,7`): parse into individual IDs, sort numerically. Find each task by id in kanban.json. Verify a spec exists at `.cc-master/specs/<id>.md` for each.
    - If argument is a file path (e.g., `build .cc-master/specs/add-auth.md`): verify the normalized path (with `..`, `.`, and symlinks resolved) starts with `.cc-master/specs/` and ends with `.md`. Reject paths that escape this prefix.
    - Otherwise: single task ID — existing single-task behavior (unchanged).
 7. **Single-task fallback:** If multi-task argument parsing resolves to exactly 1 task, fall back to single-task mode (preserving normal chain-point prompting). Print: `"1 task resolved — running in single-task mode."`
@@ -72,7 +84,7 @@ Build targets (3 tasks, autonomous mode):
   #7 Add structured logging           spec: .cc-master/specs/7.md
 ```
 
-**Single-task mode:** Same as before — call `TaskGet` to load the task, look for a spec file reference. If no spec exists, suggest running `/cc-master:spec <id>` first and stop.
+**Single-task mode:** Same as before — find the task by id in kanban.json, look for a spec file reference. If no spec exists, suggest running `/cc-master:spec <id>` first and stop.
 
 ### Step 1b: Debate Review (if --debate flag present)
 
@@ -102,13 +114,13 @@ Before any implementation begins, submit the spec(s) to `debate:all` for multi-A
 
 **Single-task mode (unchanged):**
 1. Read the spec file from `.cc-master/specs/`
-2. Call `TaskList` to find all subtasks (tasks that reference this spec or parent task in their metadata)
+2. Filter kanban.json tasks where `metadata.parent_id` matches the parent task id to find all subtasks
 3. Verify subtasks have clear assignments: files to modify, acceptance criteria, pattern references
 4. If subtasks don't exist yet, suggest running `/cc-master:spec` first and stop
 
 **Multi-task mode:**
 1. Read each spec file for all target tasks
-2. Call `TaskList` to find all subtasks across all parent tasks
+2. Filter kanban.json tasks where `metadata.parent_id` matches each parent task id to find all subtasks
 3. Collect all subtasks into a unified pool
 4. Verify all subtasks have clear assignments
 5. If any task has no subtasks, suggest running `/cc-master:spec <id>` for that task first and stop
@@ -253,7 +265,7 @@ For each wave:
 After each wave, verify agent output: read the modified files, check for conflicts, confirm the self-review summary is present in the agent's response.
 
 **After each wave:**
-- Mark completed subtasks via `TaskUpdate` (status: `completed`)
+- Mark completed subtasks in kanban.json (set `status: "completed"`, update `updated_at`)
 - Print progress: `Wave 1 complete (2/5 waves done)`
 - If any subtask failed, attempt to fix it before moving to the next wave
 - If fix fails, stop and report: `Wave 1 failed on subtask #14: <error>. Fix manually or re-run.`
@@ -331,13 +343,13 @@ Review the failures and either fix manually or re-run /cc-master:build.
 
 ### Step 7: Update Task Status
 
-**Single-task (unchanged):** Update the parent task via `TaskUpdate`:
-- If verification passed: set metadata.phase = "qa" (ready for QA)
-- If verification failed: keep status as `in_progress` with failure notes
+**Single-task (unchanged):** Update the parent task in kanban.json:
+- If verification passed: set metadata.phase = "qa" (ready for QA), update `updated_at`
+- If verification failed: keep status as `in_progress` with failure notes, update `updated_at`
 
-**Multi-task:** For each task individually:
-- If its verification passed: set metadata.phase = "qa"
-- If its verification failed: keep as `in_progress` with failure notes in description
+**Multi-task:** For each task individually, update in kanban.json:
+- If its verification passed: set metadata.phase = "qa", update `updated_at`
+- If its verification failed: keep as `in_progress` with failure notes in description, update `updated_at`
 
 ### Step 8: Chain Point / Autonomous Pipeline
 
@@ -521,9 +533,16 @@ Before you mark your subtask complete, you MUST perform this self-review. Do not
 
 **Step A — Re-read every file you modified or created.** Not a skim — read the full function bodies.
 
-**Step B — Check acceptance criteria.** For each acceptance criterion listed in your subtask:
-- Trace the code path that satisfies it. Can you point to specific lines?
-- If you cannot trace it, it is not implemented.
+**Step B — Deep trace verification of acceptance criteria.** For each acceptance criterion listed in your subtask, trace the code path from entry point to leaf. Do not stop at a call boundary you haven't verified. Follow the data, not the assumption.
+
+- Can you trace the full path to an actual leaf (DB row, SMTP call, filesystem write, external API response)?
+- If you cannot trace it to a leaf, it is not verified.
+- Apply this checklist at each layer:
+  1. **Entry point → API route** — does the path match what the client sends? Account for proxy rewrites (nginx, context path, framework annotations).
+  2. **Auth/middleware chain** — is this endpoint handled correctly by auth filters with the actual post-rewrite URI?
+  3. **Service → downstream calls** — if the service calls another service or external API, trace that call. Don't stop at `someClient.doThing(...)` and assume it works.
+  4. **Referenced resources exist** — if the code references a named template, queue, config entry, or DB record, verify it exists. A call to `getTemplate("X")` is broken if that row was never inserted.
+  5. **Variable names end-to-end** — trace each variable from where it's set → how it's passed → what key the consumer expects. A type mismatch (e.g., `expiryMinutes` receiving hours) ships broken behavior silently.
 
 **Step C — Check for misalignment with the original task.** Read your subtask description again, then read your code. Ask: does this code do what was asked, or something adjacent to it? Common drift patterns:
 - Implementing the happy path but not the stated constraint (e.g., "must validate email format" but you validate only that it's non-empty)
@@ -561,3 +580,4 @@ If any Step A-D item fails, fix it before reporting complete. Do not report issu
 - Do not expand ranges exceeding 20 tasks or `--all` exceeding 10 tasks without stopping
 - Do not dispatch parallel agents that modify the same file — detect overlap and sequence them
 - Do not accept TODO comments, mock data, stub functions, or skeleton implementations in any subtask output — every line of code must be production-ready for real client use
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively

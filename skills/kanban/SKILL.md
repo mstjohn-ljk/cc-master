@@ -1,17 +1,27 @@
 ---
 name: kanban
-description: Render current tasks as a text-based kanban board. Reads from native TaskList and displays compact column view with box-drawing characters. Use anytime to see project status at a glance.
+description: Render current tasks as a text-based kanban board. Reads from .cc-master/kanban.json and displays compact column view with box-drawing characters. Use anytime to see project status at a glance.
 ---
 
 # cc-master:kanban — Text Kanban Board
 
-Render the current task list as a visual kanban board in the terminal using box-drawing characters.
+Render the current task list as a visual kanban board in the terminal using box-drawing characters. Reads from `.cc-master/kanban.json`.
+
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Find subtasks:** Filter `tasks` where `metadata.parent_id == <parent id>`.
 
 ## Process
 
 ### Step 1: Read Task State
 
-Call `TaskList` to get all current tasks. If no tasks exist, print:
+Read `.cc-master/kanban.json` using the Read tool and parse the JSON. If the file does not exist or `tasks` array is empty, print:
 
 ```
 No tasks found. Use /cc-master:kanban-add to create tasks.
@@ -25,29 +35,23 @@ Map each task into one of four columns based on status and metadata:
 
 | Column | Condition |
 |--------|-----------|
-| **Backlog** | status = `pending` AND no `blockedBy` AND no owner |
+| **Backlog** | status = `pending` AND no `blocked_by` AND no owner |
 | **In Progress** | status = `in_progress` |
 | **Review** | status = `in_progress` AND metadata.phase = `qa` (or task subject contains "review"/"QA") |
 | **Done** | status = `completed` |
 
-Tasks with `blockedBy` that are still pending go into **Backlog** but are marked as blocked.
+Tasks with `blocked_by` that are still pending go into **Backlog** but are marked as blocked.
 
 ### Step 3: Read Metadata
 
-For each task, use `TaskGet` to read full details including:
+Each task in kanban.json already contains all needed fields:
 - `subject` — the display title (truncate to column width)
 - `owner` — show as `@owner-name` if assigned
-- `description` — parse for metadata JSON block if present
-- `blockedBy` — mark blocked tasks with a lock indicator
-
-Look for a metadata block in the task description (set by `cc-master:kanban-add`):
-```
-<!-- cc-master
-{"source":"roadmap","priority":"high","feature_id":"feat-1"}
--->
-```
-
-If present, extract `source`, `priority`, and `competitor_insight_ids` for display badges. If `competitor_insight_ids` is present and non-empty, the task is competitor-informed.
+- `description` — human-readable text (no metadata parsing needed)
+- `blocked_by` — array of blocking task IDs; mark blocked tasks with a lock indicator
+- `metadata.source` — for source badge display
+- `metadata.priority` — for priority prefix display
+- `metadata.competitor_insight_ids` — if present and non-empty, show `[C]` badge
 
 ### Step 4: Render the Board
 
@@ -81,6 +85,11 @@ Source badge (shown on next line or after title if space permits):
 - `[C]` = competitor-informed (shown alongside source badge, not replacing it)
 - `[Q]` = from qa-ui-review
 - `[D]` = from doc-review
+- `[G]` = from gap-check
+- `[T]` = from trace
+- `[A]` = from align-check
+- `[P]` = from perf-audit
+- `[B]` = from debug
 - No badge if source unknown
 
 A task can have multiple badges — e.g., `[R][C]` means "from roadmap, competitor-informed". The `[C]` badge is shown whenever `competitor_insight_ids` is present and non-empty in the task metadata.
@@ -174,14 +183,14 @@ When `--detail` is passed, render as a grouped list with full descriptions:
 ```
 
 In detail view:
-- Show task ID (from TaskList), full subject, priority, source badge(s), and owner
+- Show task ID (from kanban.json), full subject, priority, source badge(s), and owner
 - Show first line of description below the title
 - For competitor-informed tasks (`[C]` badge), show evidence lines below the description:
   - Parse the task description for text between `Market Evidence:` and `Acceptance Criteria:` headers
   - Display each evidence line prefixed with `Evidence:` and indented to align with the description
   - Show up to 3 evidence lines; if more exist, append `+ N more`
   - **Defensive parsing:** If the delimiters are missing, malformed, or yield zero parseable lines, skip the evidence display for that task rather than rendering corrupt content
-- For in-progress tasks, show subtask completion if subtasks exist (count completed vs total from blockedBy relationships)
+- For in-progress tasks, show subtask completion if subtasks exist (filter kanban.json tasks where `metadata.parent_id == task.id`, count completed vs total)
 - For blocked tasks, show what blocks them
 - For done tasks, just show "completed"
 
@@ -214,6 +223,6 @@ Kanban: 3 backlog | 2 active | 1 review | 4 done (10 total)
 
 - Do not modify any tasks — this skill is read-only
 - Do not create tasks — that's kanban-add's job
-- Do not read .cc-master/ files — kanban reads exclusively from CC's native TaskList
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — read exclusively from `.cc-master/kanban.json`
 - Do not suggest actions unless printing the hint line
 - Do not render more than 20 tasks per column — truncate with "+ N more" if exceeded

@@ -7,6 +7,18 @@ description: Orchestrate the QA cycle. Runs qa-review, then qa-fix if needed, th
 
 Run the full quality gate cycle: review -> fix -> re-review, looping until the implementation passes all gates or max iterations is reached. Supports single-task and multi-task (batch) modes.
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Find subtasks:** Filter `tasks` where `metadata.parent_id == <parent id>`.
+
 ## Input Validation Rules
 
 - **Task IDs must be positive integers only** — matching `^[0-9]+$`. Reject any argument containing path separators (`/`, `\`, `..`), shell metacharacters, or non-numeric characters (except commas for multi-task).
@@ -26,7 +38,7 @@ Arguments provide one or more task IDs:
 
 **Validate all IDs** against the Input Validation Rules above.
 
-**Single-task mode:** Call `TaskGet` to load the task. Verify:
+**Single-task mode:** Read the task from kanban.json (find by id). Verify:
 - A spec exists at `.cc-master/specs/<task-id>.md`
 - Implementation has been done (files exist, subtasks completed)
 
@@ -38,7 +50,7 @@ If not ready: `Task #3 has no spec or implementation. Run /cc-master:spec then /
 3. If neither exists, the implementation may have already been merged to the current branch. Proceed with files in the main working tree.
 
 **Multi-task mode:** Parse the comma-separated IDs. For each ID:
-1. Call `TaskGet` to load the task
+1. Find the task by id in kanban.json
 2. Verify spec and implementation exist (same checks as single-task)
 3. Resolve worktree path (same logic as above — all tasks in a batch will resolve to the same batch worktree)
 4. If any task is not ready, report which ones and stop
@@ -111,9 +123,9 @@ while iteration < MAX_ITERATIONS:
 
 When the review passes:
 
-1. Update the parent task via `TaskUpdate`:
-   - Add "QA passed" to the description
-   - Set metadata.phase = "review-complete"
+1. Update the parent task in kanban.json:
+   - Set `metadata.phase` to `"review-complete"`
+   - Update `updated_at` to current ISO timestamp
 
 2. Print the final summary:
 ```
@@ -162,9 +174,10 @@ Then wait for the user's response:
 
 When max iterations reached without passing:
 
-1. Update the parent task via `TaskUpdate`:
-   - Add "QA escalated — needs human review" to description
-   - Keep status as `in_progress`
+1. Update the parent task in kanban.json:
+   - Keep `status` as `"in_progress"`
+   - Set `metadata.phase` to `"qa-escalated"`
+   - Update `updated_at` to current ISO timestamp
 
 2. Print the escalation report:
 ```
@@ -241,3 +254,4 @@ Document all accepted limitations in the final report.
 - Do not stop the entire multi-task batch when one task escalates — continue to the next task
 - Do not pass unsanitized task IDs to file paths — validate against Input Validation Rules first
 - Do not auto-chain to complete when `--no-chain` is set — build uses this flag to manage the complete invocation as a batch
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively

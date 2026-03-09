@@ -7,6 +7,18 @@ description: Close tasks after QA passes. Creates a PR (default) or merges to ma
 
 Create a PR (default) or merge to main (with explicit `--merge`), close tasks on the kanban, and update the roadmap. This skill only runs after QA has passed. Supports single-task and multi-task (batch) modes.
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Find subtasks:** Filter `tasks` where `metadata.parent_id == <parent id>`.
+
 ## Input Validation Rules
 
 - **Task IDs must be positive integers only** — matching `^[0-9]+$`. Reject any argument containing path separators (`/`, `\`, `..`), shell metacharacters, or non-numeric characters (except commas for multi-task).
@@ -31,7 +43,7 @@ Arguments provide one or more task IDs:
 **Single-task mode:** Proceed with the single task through Steps 2-8 as before.
 
 **Multi-task mode:** Parse the comma-separated IDs. For each ID:
-1. Call `TaskGet` to load the task
+1. Read the task from kanban.json (find by id)
 2. Read the review report from `.cc-master/specs/<task-id>-review.json`
 3. Verify the latest review status is `pass` (score >= 90, no critical/high findings)
 
@@ -224,14 +236,15 @@ Remove after PR merges: git worktree remove <worktree-path>
 
 ### Step 6: Update Task Status
 
-1. Call `TaskUpdate` to mark the parent task as `completed`
-2. Mark any remaining subtasks as `completed` via `TaskUpdate`
+1. Update the parent task in kanban.json: set `status` to `"completed"`, update `updated_at`
+2. Find all subtasks in kanban.json (where `metadata.parent_id == task.id`) and set their `status` to `"completed"`, update `updated_at`
+3. Write kanban.json back
 
 **Multi-task:** Do this for each task as it is processed (not just at the end). Each task gets marked complete individually even though the merge happens once at the end.
 
 ### Step 7: Update Roadmap (if applicable)
 
-1. Read the task metadata for a `feature_id` reference
+1. Read the task's `metadata.feature_id` from kanban.json
 2. If it links to a roadmap feature, read `.cc-master/roadmap.json`
 3. Update the feature's status to `done`
 4. Write the updated roadmap back
@@ -303,3 +316,4 @@ Run /cc-master:kanban to see the updated board.
 - Do not treat deploy failure as a reason to undo or retroactively fail the merge/PR
 - Do not execute the health-check URL before completing SSRF validation
 - Do not buffer deploy script output — stream it in real-time so the user can see progress
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively

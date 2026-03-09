@@ -1,27 +1,41 @@
 ---
 name: kanban-add
-description: Add tasks to the kanban board. Supports three modes — import from roadmap, import from insights suggestions, or manual creation. Creates native CC tasks with metadata for display.
+description: Add tasks to the kanban board. Supports three modes — import from roadmap, import from insights suggestions, or manual creation. Writes to .cc-master/kanban.json with structured metadata.
 ---
 
 # cc-master:kanban-add — Task Injection
 
-Add tasks to the kanban board by creating native CC tasks. Three modes: from roadmap, from insights, or manual.
+Add tasks to the kanban board by writing to `.cc-master/kanban.json`. Three modes: from roadmap, from insights, or manual.
 
-## Metadata Convention
+## Task Persistence Protocol
 
-Every task created by this skill embeds a metadata block in the task description. This is how `cc-master:kanban` reads priority, source, and feature linkage.
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
-**Format** (HTML comment so it's invisible in normal rendering):
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
 
-```
-<!-- cc-master
-{"source":"roadmap","priority":"high","feature_id":"feat-1","complexity":"medium","acceptance_criteria":["Criterion 1","Criterion 2"],"competitor_insight_ids":["pp-3","gap-1"],"priority_rationale":"Elevated to must: critical pain point across 3 competitors"}
--->
-```
+**Create:** Read file → assign `id = next_id` → increment `next_id` → append task to `tasks` array → set `created_at` and `updated_at` to current ISO timestamp → write file back with the Write tool.
 
-The metadata block is always the LAST thing in the task description, separated by a blank line from the human-readable description text.
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` to current ISO timestamp → write file back.
 
-Fields `competitor_insight_ids` and `priority_rationale` are only present when the feature was informed by competitor analysis. kanban uses `competitor_insight_ids` to detect competitor-informed tasks and show the `[C]` badge.
+**Dedup:** Before creating tasks, check existing tasks in kanban.json for matching `metadata.source` + overlapping `subject`.
+
+## Metadata Format
+
+Metadata is stored as a structured object on each task in kanban.json — NOT as HTML comments in descriptions. The `metadata` field contains:
+
+- `source`: `"roadmap"` | `"insights"` | `"manual"` — origin of this task
+- `priority`: `"critical"` | `"high"` | `"normal"` | `"low"`
+- `feature_id`: roadmap feature ID (e.g., `"feat-1"`) or `null`
+- `parent_id`: parent task ID for subtasks, or `null`
+- `spec_file`: path to spec file, or `null`
+- `complexity`: `"low"` | `"medium"` | `"high"` or `null`
+- `acceptance_criteria`: array of criterion strings
+- `competitor_insight_ids`: array of IDs (e.g., `["pp-3", "gap-1"]`)
+- `priority_rationale`: string explaining priority elevation, or `""`
+
+The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
 
 ## Mode 1: From Roadmap
 
@@ -78,10 +92,15 @@ Fields `competitor_insight_ids` and `priority_rationale` are only present when t
 
    If `.cc-master/competitor_analysis.json` doesn't exist but features have `competitor_insight_ids`, skip this step silently — the IDs become dangling references but nothing breaks.
 
-5. For each selected feature, create a CC task via `TaskCreate`:
-   - `subject`: feature title
-   - `description`: structured description (see below) + metadata block
-   - `activeForm`: "Working on <feature title>"
+5. For each selected feature, create a task in `.cc-master/kanban.json`:
+   - Read the current kanban.json (or initialize if missing)
+   - Assign `id = next_id`, increment `next_id`
+   - Set `subject` to the feature title
+   - Set `description` to the structured description (see below) — NO metadata block in the description
+   - Set `status` to `"pending"`, `owner` to `null`
+   - Set `blocked_by` to `[]` (dependencies added in Step 6)
+   - Set `created_at` and `updated_at` to current ISO timestamp
+   - Set `metadata` fields: `source: "roadmap"`, `priority`, `feature_id`, `complexity`, `acceptance_criteria`, `competitor_insight_ids`, `priority_rationale`
 
    **Task description structure:**
 
@@ -102,11 +121,9 @@ Fields `competitor_insight_ids` and `priority_rationale` are only present when t
    Acceptance Criteria:
    - Criterion 1
    - Criterion 2
-
-   <!-- cc-master
-   {"source":"roadmap","priority":"high","feature_id":"feat-1","complexity":"medium","acceptance_criteria":[...],"competitor_insight_ids":["pp-3","gap-1"],"priority_rationale":"..."}
-   -->
    ```
+
+   Metadata (source, priority, feature_id, complexity, acceptance_criteria, competitor_insight_ids, priority_rationale) is stored in the task's `metadata` object in kanban.json — NOT embedded in the description.
 
    **Section inclusion rules:**
    - **User Stories**: Only include when the feature has a `user_stories` array (from competitor-enriched roadmap). Omit the section header entirely if none.
@@ -114,9 +131,8 @@ Fields `competitor_insight_ids` and `priority_rationale` are only present when t
      - Pain points format: `- [<severity>] "<description>" — <source> (<frequency>)`
      - Market gaps format: `- [gap] "<description>" — cross-competitor gap (<opportunity_level> opportunity)`
    - **Acceptance Criteria**: Always included.
-   - **Metadata block**: Always last. Include `competitor_insight_ids` and `priority_rationale` fields only when the feature has them.
 
-6. If features have dependencies in the roadmap, set `addBlockedBy` relationships between the created tasks.
+6. If features have dependencies in the roadmap, update the `blocked_by` arrays of the dependent tasks in kanban.json with the IDs of their blockers.
 
 7. Update `.cc-master/roadmap.json` — change each added feature's status from `idea` to `planned`. Use the Read tool to get current content, then Write tool to save updated version.
 
@@ -148,7 +164,7 @@ Fields `competitor_insight_ids` and `priority_rationale` are only present when t
 
 3. Use AskUserQuestion to let the user select which to add.
 
-4. Create CC tasks for each selected suggestion with `source: "insights"` in metadata.
+4. Create tasks in kanban.json for each selected suggestion with `metadata.source: "insights"`. Follow the same create protocol: read file → assign next_id → append → write back.
 
 5. Remove added suggestions from `pending-suggestions.json`.
 
@@ -169,10 +185,15 @@ Fields `competitor_insight_ids` and `priority_rationale` are only present when t
    - Priority: critical / high / normal / low
    - Brief description (or skip for title-only task)
 
-3. Create CC task via `TaskCreate`:
-   - `subject`: the title
-   - `description`: user-provided description + metadata block with `source: "manual"` and selected priority
-   - `activeForm`: "Working on <title>"
+3. Create task in kanban.json:
+   - Read current kanban.json (or initialize if missing)
+   - Assign `id = next_id`, increment `next_id`
+   - Set `subject` to the title
+   - Set `description` to the user-provided description (no metadata in description)
+   - Set `status` to `"pending"`, `owner` to `null`, `blocked_by` to `[]`
+   - Set `metadata.source` to `"manual"`, `metadata.priority` to the selected priority
+   - Set `created_at` and `updated_at` to current ISO timestamp
+   - Write kanban.json back
 
 4. Print confirmation:
    ```
@@ -186,5 +207,5 @@ Fields `competitor_insight_ids` and `priority_rationale` are only present when t
 
 - Do not start work on tasks — that's the spec/build skills' job
 - Do not modify existing tasks — only create new ones
-- Do not read TaskList — kanban-add creates, kanban reads
-- Do not create duplicate tasks — if importing from roadmap, check that feature_id isn't already linked to an existing task (search task descriptions for the feature_id)
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively
+- Do not create duplicate tasks — if importing from roadmap, check kanban.json for existing tasks with matching `metadata.feature_id`

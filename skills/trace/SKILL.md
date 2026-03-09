@@ -9,6 +9,20 @@ Trace the complete execution path of a specific feature through the codebase. Fo
 
 This is different from `discover` (whole-codebase breadth) — `trace` is single-feature depth. Use it when you need to fully understand how one feature works, audit its correctness, or onboard onto a specific flow.
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Create:** Read file → assign `id = next_id` → increment `next_id` → append task → set `created_at` and `updated_at` → write back.
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Dedup:** Before creating tasks, check for existing tasks with same `metadata.source` + overlapping `subject`.
+
 ## Input Validation Rules
 
 - **Task IDs must be positive integers only** — matching `^[0-9]+$`. Reject any argument containing path separators (`/`, `\`, `..`), shell metacharacters, or non-numeric characters.
@@ -33,7 +47,7 @@ The skill accepts any of:
 3. Determine mode: task ID (numeric), file:function (contains `:`), or feature name (string).
 
 **For task ID mode:**
-- Call `TaskGet` to load the task
+- Read the task from kanban.json (find by id)
 - Read the spec at `.cc-master/specs/<id>.md` if it exists
 - Extract the primary entry point: first file listed under "Files to Modify" that is a route, handler, controller, or CLI command entry — not a utility or helper
 - If no spec: use the task description to infer the most likely entry point, then verify the file exists
@@ -179,12 +193,12 @@ Files Touched (7):
 
 ### Step 6: Create Kanban Tasks
 
-For each finding (severity critical, high, or medium), create a kanban task via `TaskCreate`:
+For each finding (severity critical, high, or medium), create a task in kanban.json:
 - `subject`: `[TRACE] <severity>: <short description>` — e.g., `[TRACE] HIGH: N+1 query in InventoryRepository.checkStock`
-- `description`: Full finding with file path, line number, explanation of the risk, and suggested fix approach. Include metadata block:
-  ```
-  <!-- cc-master {"source":"trace","severity":"high","file":"src/repositories/inventory.ts","line":81,"feature":"<feature-name>"} -->
-  ```
+- `description`: Full finding with file path, line number, explanation of the risk, and suggested fix approach.
+
+  Metadata is stored in the task's `metadata` object in kanban.json:
+  `source: "trace"`, `severity`, `category: "<finding-type>"`, plus relevant file/line context.
 - `activeForm`: "Fixing <short description>"
 
 Low severity findings are reported in the output but do NOT generate kanban tasks — keep the board clean.
@@ -220,4 +234,5 @@ Written to .cc-master/traces/<slug>.md
 - Do not modify any project files (trace is read-only except for writing the output and creating tasks)
 - Do not re-run discover — load discovery.json if it exists, proceed without it if it doesn't
 - Do not create tasks for low severity findings — keep the kanban board signal-to-noise ratio high
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively
 - Do not accept fabricated entry points — verify the file and function exist before tracing

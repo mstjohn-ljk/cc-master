@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# CC working state (per-project, not part of this repo)
+.auto-claude/
+.cc-master/
+
+# CC project config (local, not committed)
+CLAUDE.md

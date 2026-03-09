@@ -12,6 +12,20 @@ Verify that the implementation chain is coherent from end to end: the original t
 qa-review asks: "Does the code match the spec?"
 align-check asks: "Does the spec match the task? Does the code match the spec? And ultimately — does the code match the task?"
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Create:** Read file → assign `id = next_id` → increment `next_id` → append task → set `created_at` and `updated_at` → write back.
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Dedup:** Before creating tasks, check for existing tasks with same `metadata.source` + overlapping `subject`.
+
 ## Input Validation Rules
 
 - **Task IDs must be positive integers only** — matching `^[0-9]+$`. Reject any argument containing path separators (`/`, `\`, `..`), shell metacharacters, or non-numeric characters (except commas for multi-task).
@@ -30,7 +44,7 @@ align-check asks: "Does the spec match the task? Does the code match the spec? A
 
 **For each task:**
 
-1. **Load the original task** via `TaskGet`. The task `subject` and `description` together represent the original intent — what was actually requested. Treat this as the ground truth for alignment.
+1. **Load the original task** from kanban.json (find by id). The task `subject` and `description` together represent the original intent — what was actually requested. Treat this as the ground truth for alignment.
 
 2. **Load the spec** from `.cc-master/specs/<task-id>.md`. If no spec exists, print:
    ```
@@ -201,12 +215,11 @@ Critical misalignments: 1
 ### Step 6: Create Kanban Tasks for Misalignments
 
 For each misalignment found (Check 1 missing/critical, Check 3 not_satisfied):
-- Create a task via `TaskCreate`:
+- Create a task in kanban.json:
   - `subject`: `[ALIGN] <severity>: <short description>`
-  - `description`: Full explanation — what the task required, what the spec says (or doesn't say), what the code does. Include suggested fix. Include metadata block:
-    ```
-    <!-- cc-master {"source":"align-check","check":"<1|2|3>","severity":"<critical|high|medium>","task_id":"<id>"} -->
-    ```
+  - `description`: Full explanation — what the task required, what the spec says (or doesn't say), what the code does. Include suggested fix.
+  - Metadata is stored in the task's `metadata` object in kanban.json:
+    `source: "align-check"`, `severity`, plus relevant check and task reference fields.
 
 Do NOT create tasks for Check 2 findings that already appear in a qa-review report — those are already tracked.
 
@@ -252,3 +265,4 @@ Then wait for user response:
 - Do not modify any code, spec, or task files — align-check is read-only except for writing the align report and creating tasks
 - Do not hallucinate requirements — every finding must reference specific text in the original task description
 - Do not pass a task where the original requester would not consider their request satisfied, regardless of qa-review score
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively

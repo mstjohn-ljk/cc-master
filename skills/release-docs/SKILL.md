@@ -1,12 +1,20 @@
 ---
 name: release-docs
 description: Generate structured release notes and CHANGELOG entries from completed kanban tasks, QA reports, and git history. Standalone utility — not auto-chained.
-tools: [Read, Write, Glob, Grep, Bash, TaskList, TaskGet]
+tools: [Read, Write, Glob, Grep, Bash]
 ---
 
 # cc-master:release-docs — Release Notes & Changelog Generation
 
 Generate release notes and CHANGELOG entries from completed kanban tasks, QA reports, and git history. Adapts to the project's existing changelog format, detects breaking changes, and produces output suitable for GitHub Releases. This skill is a standalone utility — it does not auto-chain to or from other skills.
+
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
 
 ## Input Validation Rules
 
@@ -67,8 +75,7 @@ These rules apply to ALL argument parsing across this skill:
 
 Gather change data from three sources. Each source contributes different detail levels — all three are merged in Step 4.
 
-1. **Completed tasks.** Call `TaskList` and filter for tasks with status `completed`. For each completed task:
-   - Call `TaskGet` to load the full task
+1. **Completed tasks.** Read kanban.json and filter for tasks with `status: "completed"`. For each completed task, the full task data is already available in the JSON including:
    - Extract: title, description, acceptance criteria, metadata (source skill, priority, category)
    - Check for `BREAKING` or `breaking` in the task title or description
    - Record the task ID and title for attribution in the release notes
@@ -254,3 +261,4 @@ No chain point prompt is displayed. After printing the summary, the skill ends.
 - Do not overwrite an existing release notes file without warning — if `.cc-master/releases/<version>-notes.md` already exists, print: `"Release notes for <version> already exist. Overwrite? (yes/no)"` and wait for confirmation.
 - Do not create a new CHANGELOG.md if one does not already exist — only update existing files.
 - Do not guess or invent version numbers when `--version` is not provided and no tags exist — stop and ask the user.
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — read tasks from kanban.json

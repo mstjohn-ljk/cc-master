@@ -7,6 +7,22 @@ description: Create structured implementation specs for tasks. Supports single I
 
 Take tasks and produce detailed implementation specs — requirements, files to modify, acceptance criteria, verification steps — then break each into ordered subtasks. Supports single-task and multi-task modes.
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Create:** Read file → assign `id = next_id` → increment `next_id` → append task → set `created_at` and `updated_at` → write back.
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Find subtasks:** Filter `tasks` where `metadata.parent_id == <parent id>`.
+
+**Dedup:** Before creating tasks, check for existing tasks with same `metadata.source` + overlapping `subject`.
+
 ## Input Validation Rules
 
 These rules apply to ALL argument parsing across this skill:
@@ -44,7 +60,7 @@ After sanitization:
 - The issue title becomes the spec title
 - The issue body becomes the requirement text for Steps 3 and 4
 
-**Task ID + issue URL combination** (e.g., `spec 5 --from-issue <url>`): The task's subject from TaskGet takes precedence over the issue title for file naming. The issue body is used as additional requirement context alongside the task description.
+**Task ID + issue URL combination** (e.g., `spec 5 --from-issue <url>`): The task's subject from kanban.json takes precedence over the issue title for file naming. The issue body is used as additional requirement context alongside the task description.
 
 **No task ID provided** (only `--from-issue <url>`): Slugify the issue title per Input Validation Rules for the spec filename. Print: `"No task ID provided — spec will not be linked to a kanban task. Run /cc-master:kanban-add first if you want tracking."`
 
@@ -60,12 +76,12 @@ The task is specified via arguments. Accept any of:
 **Validate all arguments** against the Input Validation Rules above before any parsing.
 
 **Multi-task argument parsing:**
-- If `--all`: Call `TaskList`, find all tasks that do NOT already have a spec at `.cc-master/specs/<id>.md`. If none need specs, print `"All tasks already have specs."` and stop. If more than 10 tasks need specs, print `"Found N tasks needing specs (max 10). Specify a subset with spec 3,5,7 or spec 3-7."` and stop.
+- If `--all`: Read kanban.json, find all tasks that do NOT already have a spec at `.cc-master/specs/<id>.md`. If none need specs, print `"All tasks already have specs."` and stop. If more than 10 tasks need specs, print `"Found N tasks needing specs (max 10). Specify a subset with spec 3,5,7 or spec 3-7."` and stop.
 - If range (`N-M`): validate range ordering and size per Input Validation Rules. Expand to individual IDs.
 - If comma-separated: parse into individual IDs, sort numerically. Reject lists exceeding 20 tasks — print `"N task IDs provided (max 20). Use a smaller set."` and stop.
 - If exactly 1 task resolves: fall back to single-task mode.
 
-**For each task ID:** Call `TaskGet` to load the full task. Verify the task exists and doesn't already have a spec file. If a spec already exists for a task, skip it with a note: `"Task #3 already has a spec at .cc-master/specs/3.md — skipping."`
+**For each task ID:** Find the task in kanban.json by id. Verify the task exists and doesn't already have a spec file. If a spec already exists for a task, skip it with a note: `"Task #3 already has a spec at .cc-master/specs/3.md — skipping."`
 
 **Error handling in multi-task mode:** If any task ID fails to load (task doesn't exist, ID invalid, etc.), report all failures and stop before creating any specs. Do not partial-spec — all-or-nothing for the batch.
 
@@ -183,19 +199,23 @@ Break the spec into 3-7 subtasks. Each subtask should be:
 - **Small enough to complete in one session** — if a subtask feels like it needs sub-subtasks, it's too big
 - **Ordered by dependency** — later subtasks can depend on earlier ones
 
-For each subtask, create a CC task via `TaskCreate`:
-- `subject`: subtask title
-- `description`: subtask details including files to modify, the pattern to follow, and acceptance criteria for this specific subtask + a reference to the spec file + metadata block
-- `activeForm`: "Implementing <subtask title>"
+For each subtask, create a task in kanban.json:
+- Read kanban.json, assign `id = next_id`, increment `next_id`
+- Set `subject` to the subtask title
+- Set `description` to subtask details including files to modify, the pattern to follow, and acceptance criteria — NO metadata block in the description
+- Set `status` to `"pending"`, `owner` to `null`
+- Set `blocked_by` based on the dependency chain (use IDs of prerequisite subtasks)
+- Set `metadata.source` to `"spec"`, `metadata.parent_id` to the parent task's ID
+- Set `metadata.spec_file` to the spec file path
+- Set `created_at` and `updated_at` to current ISO timestamp
+- Write kanban.json back after all subtasks are added
 
-Set `addBlockedBy` relationships based on the dependency chain.
-
-If the spec was created for an existing kanban task (by ID), make all subtasks block that parent task — or link them by including the parent task ID in each subtask's metadata.
+All subtasks reference the parent task via `metadata.parent_id`.
 
 ### Step 6: Update Parent Task
 
 If the spec was created for an existing kanban task:
-1. Call `TaskUpdate` to update the parent task's description with a link to the spec file
+1. Update the parent task in kanban.json: set `metadata.spec_file` to the spec file path
 2. The parent task stays in its current status — subtasks drive the progress
 
 ### Step 7: Print Summary

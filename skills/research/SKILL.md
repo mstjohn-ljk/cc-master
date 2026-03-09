@@ -9,6 +9,20 @@ description: Perplexity-style deep web research for software development topics.
 
 Research software development topics with structured web searches, parallel fetching, and synthesized results with citations. Designed for library trade-offs, API documentation, architecture comparisons, best practices, and technical decision-making.
 
+## Task Persistence Protocol
+
+Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
+Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
+
+**Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
+If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
+
+**Create:** Read file → assign `id = next_id` → increment `next_id` → append task → set `created_at` and `updated_at` → write back.
+
+**Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
+
+**Dedup:** Before creating tasks, check for existing tasks with same `metadata.source` + overlapping `subject`.
+
 ## Input Validation Rules
 
 - **Question string:** Required first positional argument. Must be a non-empty string. Maximum 500 characters — reject longer questions with: `"Question too long (N chars). Maximum 500 characters."` Reject questions containing shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `<`, backtick, `$`, `\`) with: `"Invalid characters in question."` Reject empty string.
@@ -176,7 +190,7 @@ If `--save` was passed:
 If `--tasks` was passed:
 
 1. Scan the Recommendations section and Key Findings for concrete, actionable items that could become kanban tasks (e.g., "Evaluate library X for your use case", "Set up Redis Cluster", "Add connection pooling to reduce latency").
-2. For each action item identified (maximum 5), create a task via TaskCreate:
+2. For each action item identified (maximum 5), create a task in kanban.json:
    - **subject:** `[RESEARCH] <action item title>`
    - **description:**
      ```
@@ -223,3 +237,4 @@ No pipeline continuation is offered. No further chaining occurs.
 - Do not guess or fabricate research findings — every claim must come from a fetched web page
 - Do not skip the honest-limitations notice — print it at the start of every run
 - Do not accept unknown flags silently — reject with a clear error listing valid flags
+- Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively
