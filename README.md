@@ -2,20 +2,28 @@
 
 Autonomous project management for Claude Code. Roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native.
 
-CC-Master is a Claude Code plugin that adds 13 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
+CC-Master is a Claude Code plugin that adds 30 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
 
 ## Install
 
-```bash
-claude plugin add --marketplace https://github.com/mstjohn-ljk/cc-master
-claude plugin install cc-master
+Run these inside a Claude Code session (not your shell):
+
+```
+/plugin marketplace add mstjohn-ljk/cc-master
+/plugin install cc-master@mstjohn-ljk-cc-master
 ```
 
-Or install directly from a local clone:
+Or install from a local clone:
 
 ```bash
 git clone git@github.com:mstjohn-ljk/cc-master.git
-claude plugin add /path/to/cc-master
+```
+
+Then inside Claude Code:
+
+```
+/plugin marketplace add ./cc-master
+/plugin install cc-master@cc-master
 ```
 
 ## Skills
@@ -29,7 +37,7 @@ claude plugin add /path/to/cc-master
                                 │
 /cc-master:roadmap      →  roadmap.json (with competitor evidence when available)
                                 │
-/cc-master:kanban-add   →  TaskCreate (from roadmap, insights, or manual)
+/cc-master:kanban-add   →  kanban.json (from roadmap, insights, or manual)
                                 │
 /cc-master:kanban       →  text kanban board
                                 │
@@ -68,6 +76,21 @@ The planning chain ends at kanban-add — after features are imported, you selec
 
 ---
 
+### Skill Reference
+
+Skills are organized by phase. See `docs/skills/` for full documentation on every skill.
+
+| Phase | Skills |
+|-------|--------|
+| [Understanding](docs/skills/understanding.md) | `discover`, `trace`, `insights`, `overview` |
+| [Planning](docs/skills/planning.md) | `competitors`, `roadmap`, `research` |
+| Task Management | `kanban`, `kanban-add` |
+| [Implementation](docs/skills/implementation.md) | `spec`, `build`, `scaffold`, `debug`, `hotfix`, `test-gen` |
+| [Quality](docs/skills/quality.md) | `qa-review`, `qa-fix`, `qa-loop`, `qa-ui-review`, `align-check`, `gap-check`, `api-contract`, `doc-review`, `perf-audit` |
+| [Completion & Docs](docs/skills/completion.md) | `complete`, `pr-review`, `release-docs`, `dev-guide`, `user-guide`, `openapi-docs` |
+
+---
+
 ### Understanding
 
 **`/cc-master:discover`** — Deep codebase analysis. Traces actual execution paths, reads implementations, identifies patterns and gaps. Produces `.cc-master/discovery.json`.
@@ -75,7 +98,7 @@ The planning chain ends at kanban-add — after features are imported, you selec
 Not a file scanner. Reads the actual auth middleware to tell you it's JWE + HMAC, not "uses JWT" because it found a keyword.
 
 ```
-Usage:  /cc-master:discover [--auto]
+Usage:  /cc-master:discover [--auto] [--update]
 Output: .cc-master/discovery.json
 Chains: → roadmap (prompted or auto)
 ```
@@ -83,6 +106,18 @@ Chains: → roadmap (prompted or auto)
 | Flag | Effect |
 |------|--------|
 | `--auto` | Skip chain point prompt, continue to roadmap automatically |
+| `--update` | Incremental refresh — re-traces only modules changed since last run |
+
+**`/cc-master:trace`** — Single-feature depth tracing. Follows the complete execution path for one feature from entry point to leaf, detects bugs and risks at each node, creates kanban tasks for findings.
+
+Narrower and faster than discover — one feature at full depth.
+
+```
+Usage:  /cc-master:trace <task-id>
+        /cc-master:trace "feature name"
+        /cc-master:trace src/routes/checkout.ts:handleCheckout [--depth <1-20>]
+Output: .cc-master/traces/<slug>.md
+```
 
 ---
 
@@ -96,22 +131,13 @@ Output: .cc-master/competitor_analysis.json
 Chains: → roadmap (prompted or auto)
 ```
 
-| Flag | Effect |
-|------|--------|
-| `--auto` | Skip chain point prompt, continue to roadmap automatically |
-
-**`/cc-master:roadmap`** — Strategic feature generation from project understanding. MoSCoW prioritization, complexity/impact assessment, dependency-ordered phases. When competitor data is available, features are enriched with user stories, linked to market evidence, and given priority boosts based on pain point severity. Produces `.cc-master/roadmap.json`.
+**`/cc-master:roadmap`** — Strategic feature generation from project understanding. MoSCoW prioritization, complexity/impact assessment, dependency-ordered phases. When competitor data is available, features are enriched with user stories, linked to market evidence, and given priority boosts based on pain point severity.
 
 ```
 Usage:  /cc-master:roadmap [--auto] [--competitors]
 Output: .cc-master/roadmap.json
 Chains: → kanban-add (prompted or auto)
 ```
-
-| Flag | Effect |
-|------|--------|
-| `--auto` | Skip chain point prompt, continue to kanban-add automatically |
-| `--competitors` | Run competitor analysis inline before generating the roadmap |
 
 **`/cc-master:insights`** — Codebase Q&A with task extraction. Ask questions, get deep answers, and actionable task suggestions are surfaced automatically.
 
@@ -120,7 +146,19 @@ Usage:  /cc-master:insights <question>
 Output: .cc-master/insights/sessions.json, .cc-master/insights/pending-suggestions.json
 ```
 
-No flags. Interactive Q&A — just ask your question as the argument.
+**`/cc-master:overview`** — Stakeholder-ready project report synthesized from pipeline artifacts. Three-act narrative: What We Have / What The Market Expects / What We're Building.
+
+```
+Usage:  /cc-master:overview [--technical] [--output <dir>] [--title <string>]
+Output: .cc-master/reports/overview-<timestamp>.md
+```
+
+**`/cc-master:research`** — Deep web research for software development topics. Decomposes questions into parallel search angles, synthesizes sources with citations.
+
+```
+Usage:  /cc-master:research <question>
+Output: .cc-master/research/<slug>.md
+```
 
 ---
 
@@ -143,161 +181,156 @@ No flags. Interactive Q&A — just ask your question as the argument.
 Usage:  /cc-master:kanban [--detail] [--compact] [--filter <column>]
 ```
 
-| Flag | Effect |
-|------|--------|
-| `--detail` | Expanded list view with full descriptions and competitor evidence |
-| `--compact` | Single-line summary: `Kanban: 3 backlog \| 2 active \| 1 review \| 4 done` |
-| `--filter <column>` | Show only one column: `backlog`, `progress`, `review`, or `done` |
-
-Source badges: `[R]` roadmap, `[M]` manual, `[I]` insights, `[Q]` qa-ui-review, `[C]` competitor-informed. Priority prefixes: `!` critical, `*` high, `-` normal, `.` low.
-
-**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually. When importing from a competitor-enriched roadmap, resolves pain points and market gaps into human-readable evidence embedded in task descriptions.
+**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually.
 
 ```
 Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>]
 ```
 
-| Flag / Argument | Effect |
-|-----------------|--------|
-| `--from-roadmap` | Import features from roadmap.json. Prompts to select which features. |
-| `--from-insights` | Import suggestions from insights sessions |
-| `<title>` | Create a manual task with the given title |
-
-When importing from a competitor-enriched roadmap, tasks get `[C]` badges and embedded market evidence.
-
 ---
 
 ### Implementation
 
-**`/cc-master:spec`** — Structured specification with files to modify, acceptance criteria, and subtask breakdown with dependency ordering. Auto-runs discover if `discovery.json` is missing.
+**`/cc-master:spec`** — Structured specification with files to modify, acceptance criteria, and subtask breakdown with dependency ordering.
 
 ```
 Usage:  /cc-master:spec <id> [--auto]
-        /cc-master:spec 3,5,7          # comma-separated
-        /cc-master:spec 3-7            # range (max 20)
-        /cc-master:spec --all          # all unspec'd tasks (max 10)
-        /cc-master:spec "description"  # unlinked spec
+        /cc-master:spec 3,5,7 | /cc-master:spec 3-7 | /cc-master:spec --all
 Output: .cc-master/specs/<task-id>.md
 Chains: → build (prompted or auto)
 ```
 
-| Flag / Format | Effect |
-|---------------|--------|
-| `--auto` | Skip chain point prompt, continue to build automatically |
-| `--all` | Spec all kanban tasks that don't have specs yet (max 10) |
-| `3,5,7` | Comma-separated task IDs for batch spec creation |
-| `3-7` | Range of task IDs (max 20, must be ascending) |
-
-**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves and dispatches parallel agents for independent work. Enforces production quality — no TODOs, no stubs, no mock data.
+**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete.
 
 ```
 Usage:  /cc-master:build <id> [--auto]
-        /cc-master:build 3,5,7         # comma-separated (shared worktree)
-        /cc-master:build 3-7           # range (max 20)
-        /cc-master:build --all         # all spec'd tasks (max 10)
-Output: Code in .cc-master/worktrees/<task-slug>/ or .cc-master/worktrees/batch-<ids>/
+        /cc-master:build 3,5,7 | /cc-master:build 3-7 | /cc-master:build --all
+Output: .cc-master/worktrees/<task-slug>/
 Chains: → qa-loop (prompted or auto)
 ```
 
-| Flag / Format | Effect |
-|---------------|--------|
-| `--auto` | Skip chain point prompt, continue to qa-loop automatically |
-| `--all` | Build all tasks that have specs (max 10) |
-| `3,5,7` | Comma-separated IDs — shared worktree, autonomous execution |
-| `3-7` | Range of IDs — shared worktree, autonomous execution (max 20) |
+**`/cc-master:scaffold`** — Bootstrap a new project from scratch with structure, tests, and CI.
 
-Multi-task mode is always autonomous: build all → qa-loop each → complete as batch.
+```
+Usage:  /cc-master:scaffold [--stack <name>] [--auto]
+Chains: → discover → roadmap (prompted or auto)
+```
+
+**`/cc-master:debug`** — Bug investigation and fix. Traces root cause, implements minimal fix, writes regression test, runs targeted QA. Works on current branch.
+
+```
+Usage:  /cc-master:debug "<bug description>" | "<stack trace>" | file:function
+```
+
+**`/cc-master:hotfix`** — Production emergency response. Hotfix branch, abbreviated investigation, minimal fix, fast QA, tagged PR.
+
+```
+Usage:  /cc-master:hotfix "<description>" [--version patch|minor] [--backport <branch>]
+```
+
+**`/cc-master:test-gen`** — Generate comprehensive tests for existing code following the project's exact test patterns. No new frameworks introduced.
+
+```
+Usage:  /cc-master:test-gen <file|glob|directory> [--runner <framework>] [--coverage]
+```
 
 ---
 
 ### Quality Assurance
 
-**`/cc-master:qa-review`** — Scored validation against spec and acceptance criteria. Checks functional correctness, code quality, security, test coverage, and production readiness (no stubs, no mock data). Produces a structured pass/fail report.
+**`/cc-master:qa-review`** — Scored validation against spec and acceptance criteria. Applies [deep trace verification](docs/deep-trace-verification.md) to follow each criterion to an actual leaf. Checks functional correctness, code quality, security, test coverage, and production readiness.
 
 ```
 Usage:  /cc-master:qa-review <task-id>
 Output: .cc-master/specs/<task-id>-review.json
 ```
 
-No flags. Pass threshold: score >= 90, zero unmet acceptance criteria, zero critical/high findings. Automatically locates the worktree for the task (batch or single-task).
+Pass threshold: score ≥ 90, zero unmet criteria, zero critical/high findings.
 
-**`/cc-master:qa-fix`** — Triages review findings (real issue / false positive / pre-existing) and applies targeted fixes. Reads the review report produced by qa-review.
+**`/cc-master:qa-fix`** — Triages review findings and applies targeted fixes.
 
 ```
 Usage:  /cc-master:qa-fix <task-id>
-Input:  .cc-master/specs/<task-id>-review.json (must exist — run qa-review first)
+Input:  .cc-master/specs/<task-id>-review.json (must exist)
 ```
 
-No flags. Classifies each finding before fixing: real issue, false positive, pre-existing small (fix in-band), pre-existing widespread (note for follow-up), or design decision (dismiss).
-
-**`/cc-master:qa-loop`** — Orchestrates review -> fix -> re-review, looping until all gates pass or max 5 iterations. Tracks score progression and detects regressions.
+**`/cc-master:qa-loop`** — Orchestrates review → fix → re-review until passing or max 5 iterations.
 
 ```
 Usage:  /cc-master:qa-loop <id> [--auto] [--no-chain]
-        /cc-master:qa-loop 3,5,7       # comma-separated batch
+        /cc-master:qa-loop 3,5,7
 Chains: → complete (prompted or auto, unless --no-chain)
 ```
 
-| Flag | Effect |
-|------|--------|
-| `--auto` | Skip chain point prompt, continue to complete automatically |
-| `--no-chain` | Do not chain to complete on pass. Used by build's batch pipeline. |
-| `3,5,7` | Comma-separated IDs — processes each task sequentially |
-
----
-
-### Completion
-
-**`/cc-master:complete`** — Creates a pull request (default) or merges to main after QA passes. Updates kanban status and roadmap feature status. Never merges directly to main without explicit approval.
-
-```
-Usage:  /cc-master:complete <id> [--pr] [--merge] [--target <branch>] [--auto]
-        /cc-master:complete 3,5,7      # comma-separated batch
-```
-
-| Flag | Effect |
-|------|--------|
-| `--pr` | Create a pull request (this is the default — flag is optional) |
-| `--merge` | Merge directly to main (explicit override required) |
-| `--target <branch>` | PR target branch (default: main) |
-| `--auto` | Skip prompts. Defaults to PR. Honors `--merge` if explicitly passed alongside. |
-| `3,5,7` | Comma-separated IDs — single PR or merge for the shared batch branch |
-
-**Default behavior:**
-- Without flags: asks the user (PR recommended, or merge)
-- With `--auto`: creates a PR (never merges without explicit `--merge`)
-- With `--merge`: merges directly to main (explicit user override — bypasses PR review)
-- `--pr` and `--merge` together: rejected as conflicting
-
-**Batch mode:** When completing multiple tasks from a shared worktree, commits once (first task), creates one PR or merge (last task), and updates each task's kanban status individually.
-
----
-
-### UI Testing
-
-**`/cc-master:qa-ui-review`** — End-to-end UI testing via Playwright browser automation. Exercises user flows, reviews look & feel, accessibility, responsive design, and client-side security against a running application. Creates kanban tasks for every finding with `[Q]` badges. Standalone — not part of the auto-chain pipeline.
+**`/cc-master:qa-ui-review`** — End-to-end UI testing via Playwright. Exercises user flows, accessibility, responsive design, client-side security. Requires Playwright MCP server.
 
 ```
 Usage:  /cc-master:qa-ui-review <url> [<task-id>] [--spec <id>] [--auth-env <file>] [--flows <list>]
-Output: .cc-master/ui-reviews/<review-id>-review.json
-        .cc-master/ui-reviews/<review-id>/screenshots/
+Output: .cc-master/ui-reviews/<review-id>-review.json + screenshots/
 ```
 
-| Flag | Effect |
-|------|--------|
-| `<url>` | Required. The live URL to test (http/https). |
-| `<task-id>` | Optional. Links the review to a kanban task. |
-| `--spec <id>` | Load spec's acceptance criteria for targeted validation. |
-| `--auth-env <file>` | Env file with credentials for authenticated flows (KEY=VALUE format). |
-| `--flows <list>` | Comma-separated flow names to run. Default: all applicable. |
+Pass threshold: score ≥ 80, zero critical findings.
 
-Available flows: `navigation`, `forms`, `auth`, `crud`, `responsive`, `error-handling`.
+**`/cc-master:align-check`** — Three-way alignment: original task → spec → code. Catches when a spec accurately describes code that does the wrong thing.
 
-**Security notes:** Add auth-env files to `.gitignore` — never commit credentials. Credential values are used only for browser session login and are not written to review reports. When testing non-local environments, always use `https://` URLs.
+```
+Usage:  /cc-master:align-check <task-id> [--auto]
+Output: .cc-master/specs/<task-id>-align.json
+```
 
-Scoring: CRITICAL (-20), HIGH (-10), MEDIUM (-5), LOW (-2). Pass threshold: score >= 80 and zero critical findings. Categories: e2e, security, accessibility, responsive, ux, performance.
+**`/cc-master:gap-check`** — Pipeline gap detector. Finds everything forgotten between planning and code: unspec'd features, uncovered criteria, incomplete subtasks, missing tests.
 
-Requires Playwright MCP server.
+```
+Usage:  /cc-master:gap-check <task-id> | --all | --roadmap
+Output: .cc-master/gap-check-<timestamp>.json
+```
+
+**`/cc-master:api-contract`** — Frontend/backend contract verification from source code. No OpenAPI spec required. Traces through proxy layers. Optional auto-fix and live runtime verification.
+
+```
+Usage:  /cc-master:api-contract [--scope frontend|backend|both] [--fix] [--live <url>]
+Output: .cc-master/api-contracts/<timestamp>-contract-report.json
+```
+
+**`/cc-master:doc-review`** — Documentation accuracy validation. Cross-references docs against actual code.
+
+**`/cc-master:perf-audit`** — N+1 detection, unbounded query analysis, hot path identification.
+
+---
+
+### Completion & Documentation
+
+**`/cc-master:complete`** — Creates a pull request (default) or merges to main after QA passes. Never merges without explicit `--merge`.
+
+```
+Usage:  /cc-master:complete <id> [--pr] [--merge] [--target <branch>] [--auto]
+        /cc-master:complete 3,5,7
+```
+
+**`/cc-master:pr-review`** — Review incoming pull requests. Applies quality gates, produces GitHub-formatted output, optionally posts via `gh` CLI.
+
+**`/cc-master:release-docs`** — Generate release notes and CHANGELOG entries from completed tasks and git history.
+
+**`/cc-master:dev-guide`** — Developer documentation for contributors: build system, tests, CI, extension points.
+
+**`/cc-master:user-guide`** — User-facing documentation adapted to the project type.
+
+**`/cc-master:openapi-docs`** — Generate OpenAPI 3.1 specs from codebase analysis. Multi-framework support.
+
+---
+
+## Deep Trace Verification
+
+Build and QA agents are required to trace every acceptance criterion to a **leaf** — the actual point where data is read, written, sent, or received — before reporting it complete.
+
+The five-point checklist:
+1. Entry point is reachable (route registered, command wired, handler bound)
+2. Each layer calls the next correctly (read the callee — don't assume it works)
+3. Referenced resources exist (config keys, templates, env vars, file paths)
+4. Data shape is consistent end-to-end (name, type, unit at every boundary)
+5. Error and absence paths are handled (not silently swallowed)
+
+See [docs/deep-trace-verification.md](docs/deep-trace-verification.md) for the full methodology.
 
 ---
 
@@ -310,16 +343,20 @@ CC-Master stores project-level state in `.cc-master/` at the project root:
 ├── discovery.json              # Deep project understanding
 ├── competitor_analysis.json    # Competitor pain points and market gaps
 ├── roadmap.json                # Strategic feature roadmap
-├── specs/                      # Per-task implementation specs
+├── kanban.json                 # Persisted task board (survives context clears)
+├── specs/                      # Per-task specs and review reports
 │   ├── <task-id>.md
-│   └── <task-id>-review.json
+│   ├── <task-id>-review.json
+│   └── <task-id>-align.json
+├── traces/                     # Single-feature trace outputs
+│   └── <slug>.md
 ├── insights/
-│   ├── sessions.json           # Q&A session log
+│   ├── sessions.json
 │   └── pending-suggestions.json
+├── reports/                    # Overview and release reports
+├── api-contracts/              # API contract reports
+├── research/                   # Research outputs
 ├── ui-reviews/                 # UI testing reports and screenshots
-│   ├── <review-id>-review.json
-│   └── <review-id>/
-│       └── screenshots/
 └── worktrees/                  # Isolated git worktrees for builds
     └── batch-*/.batch-manifest.json
 ```
@@ -333,17 +370,15 @@ Skills compose through JSON artifacts:
 - `discover` writes `discovery.json` → `roadmap` reads it
 - `competitors` writes `competitor_analysis.json` → `roadmap` reads it (optional)
 - `roadmap` writes `roadmap.json` → `kanban-add` reads it
-- `kanban-add` resolves competitor evidence, creates CC tasks → `kanban` renders them
+- `kanban-add` resolves competitor evidence, creates tasks → `kanban` renders them
 - `spec` writes spec files → `build` reads them
-- `build` produces code in worktrees → `qa-review` validates it
+- `build` produces code in worktrees → `qa-review` validates it with deep trace verification
 - `qa-fix` fixes findings → `qa-review` re-validates
 - `complete` creates a PR (or merges with explicit `--merge`) after QA passes
 
-Each skill works standalone. You can `kanban-add` manual tasks without a roadmap, or run `qa-review` on any code without the full pipeline.
+Each skill works standalone.
 
 ## MCP Server Integration
-
-Skills optionally leverage MCP servers for enhanced capabilities:
 
 | MCP Server | Used By | Type | Purpose |
 |------------|---------|------|---------|
@@ -351,48 +386,27 @@ Skills optionally leverage MCP servers for enhanced capabilities:
 | Context7 | competitors | recommended | Live documentation for market research |
 | Sequential Thinking | qa-ui-review | recommended | Structured multi-step reasoning |
 
-Skills marked `recommended` degrade gracefully without the MCP server — they use built-in tools as fallback. Skills marked `required` will not function without the server and will print an error message.
-
 ## Full Pipeline Examples
 
 ### Single task (interactive)
 
 ```bash
-# 1. Understand the codebase
 /cc-master:discover
-
-# 2. (Optional) Analyze competitors
-/cc-master:competitors
-
-# 3. Generate a feature roadmap
+/cc-master:competitors        # optional
 /cc-master:roadmap
-
-# 4. Add features to the kanban
 /cc-master:kanban-add --from-roadmap
-
-# 5. See the board
 /cc-master:kanban
-
-# 6. Spec out a task
 /cc-master:spec 3
-
-# 7. Build it
 /cc-master:build 3
-
-# 8. Run QA until clean
 /cc-master:qa-loop 3
-
-# 9. Create a PR (default) or merge
 /cc-master:complete 3
 ```
 
 ### Single task (fully autonomous)
 
 ```bash
-# Discover, plan, and add tasks — then stop for task selection
 /cc-master:discover --auto
-
-# After selecting a task, spec through completion
+# After selecting a task:
 /cc-master:spec 3 --auto
 # chains: spec → build → qa-loop → complete (creates PR)
 ```
@@ -400,36 +414,25 @@ Skills marked `recommended` degrade gracefully without the MCP server — they u
 ### Batch (multiple tasks, autonomous)
 
 ```bash
-# Spec multiple tasks
 /cc-master:spec 3,5,7
-
-# Build all — autonomous pipeline handles QA and PR creation
 /cc-master:build 3,5,7
 # chains: build all → qa-loop each → complete batch (single PR)
 ```
 
-### Competitor-informed roadmap
+### Verification only
 
 ```bash
-# Discover + competitors + roadmap in one command
-/cc-master:roadmap --competitors
+# Check alignment between task, spec, and code
+/cc-master:align-check 3
 
-# Or run competitors separately first
-/cc-master:competitors
-/cc-master:roadmap
-```
+# Find everything forgotten in the pipeline
+/cc-master:gap-check --all
 
-### UI testing (standalone)
+# Verify frontend/backend contract
+/cc-master:api-contract --fix
 
-```bash
-# Test a running application
-/cc-master:qa-ui-review http://localhost:3000
-
-# With spec validation and auth
-/cc-master:qa-ui-review http://localhost:3000 3 --spec 3 --auth-env .env.test
-
-# Only specific flows
-/cc-master:qa-ui-review http://localhost:3000 --flows navigation,responsive
+# Audit for N+1 queries and performance issues
+/cc-master:perf-audit --focus db
 ```
 
 ## License
