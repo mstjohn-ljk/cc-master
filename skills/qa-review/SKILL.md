@@ -50,12 +50,12 @@ These rules apply to ALL argument parsing across this skill:
 For each acceptance criterion in the spec:
 
 1. Read the implementation file(s) that address this criterion
-2. **Deep trace to leaf.** Trace the logic from entry point through every layer to an actual leaf (DB row, SMTP call, filesystem write, external API response). Do not stop at a call boundary you haven't verified. Follow the data, not the assumption. At each layer, apply:
-   a. **Entry point → API route** — does the path match what the client sends? Account for every proxy rewrite (nginx, context path, framework annotations).
-   b. **Auth/middleware chain** — is this endpoint handled correctly by auth filters with the actual post-rewrite URI?
-   c. **Service → downstream calls** — if the service calls another service or external API, trace that call. Don't stop at `someClient.doThing(...)` and assume it works.
-   d. **Referenced resources exist** — if the code references a named template, queue, config entry, or DB record, verify it exists. A call to `getTemplate("X")` is broken if that row was never inserted.
-   e. **Variable names end-to-end** — trace each variable from where it's set → how it's passed → what key the consumer expects. A type mismatch (e.g., `expiryMinutes` receiving hours) ships broken behavior silently.
+2. **Deep trace to leaf.** Trace the logic from entry point through every layer to an actual leaf — the point where data is actually read, written, sent, or received. Do not stop at a call boundary you haven't verified. Follow the data, not the assumption. At each layer, apply:
+   a. **Entry point exists and is reachable** — verify the trigger actually invokes this code path. Route registered? Command wired? Event handler bound? Subscription active?
+   b. **Each layer calls the next correctly** — at every call boundary, verify the callee exists, accepts the arguments being passed, and returns what the caller expects. Don't stop at `someService.doThing(...)` and assume it works — read `doThing`.
+   c. **Referenced resources exist** — if the code looks up a named resource (config key, template, queue, DB record, env var, file path, translation key), verify it actually exists where the code expects it.
+   d. **Data shape is consistent end-to-end** — trace each value from origin through every transformation to consumption. Verify name, type, and unit are correct at every boundary. A field set in seconds but read as milliseconds ships broken behavior silently.
+   e. **Error and absence paths are handled** — at each layer, what happens if the call fails, returns null, or throws? Is the failure surfaced or swallowed?
 3. Check edge cases: what happens with empty input, null values, errors, concurrent access?
 4. Mark as: `met`, `partially_met` (with explanation), or `not_met` (with explanation)
 

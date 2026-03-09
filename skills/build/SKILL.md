@@ -533,16 +533,16 @@ Before you mark your subtask complete, you MUST perform this self-review. Do not
 
 **Step A — Re-read every file you modified or created.** Not a skim — read the full function bodies.
 
-**Step B — Deep trace verification of acceptance criteria.** For each acceptance criterion listed in your subtask, trace the code path from entry point to leaf. Do not stop at a call boundary you haven't verified. Follow the data, not the assumption.
+**Step B — Deep trace verification of acceptance criteria.** For each acceptance criterion listed in your subtask, trace the code path from entry point to leaf — the point where data is actually read, written, sent, or received. Do not stop at a call boundary you haven't verified. Follow the data, not the assumption.
 
-- Can you trace the full path to an actual leaf (DB row, SMTP call, filesystem write, external API response)?
+- Can you trace the full path to an actual leaf? (A leaf depends on the project: a DB query, an HTTP request, a file write, a message publish, a rendered UI element — whatever the final side effect is.)
 - If you cannot trace it to a leaf, it is not verified.
 - Apply this checklist at each layer:
-  1. **Entry point → API route** — does the path match what the client sends? Account for proxy rewrites (nginx, context path, framework annotations).
-  2. **Auth/middleware chain** — is this endpoint handled correctly by auth filters with the actual post-rewrite URI?
-  3. **Service → downstream calls** — if the service calls another service or external API, trace that call. Don't stop at `someClient.doThing(...)` and assume it works.
-  4. **Referenced resources exist** — if the code references a named template, queue, config entry, or DB record, verify it exists. A call to `getTemplate("X")` is broken if that row was never inserted.
-  5. **Variable names end-to-end** — trace each variable from where it's set → how it's passed → what key the consumer expects. A type mismatch (e.g., `expiryMinutes` receiving hours) ships broken behavior silently.
+  1. **Entry point exists and is reachable** — verify the trigger actually invokes this code path. Route registered? Command wired? Event handler bound?
+  2. **Each layer calls the next correctly** — at every call boundary, verify the callee exists, accepts the arguments being passed, and returns what the caller expects. Don't stop at `someService.doThing(...)` and assume it works — read `doThing`.
+  3. **Referenced resources exist** — if the code looks up a named resource (config key, template, queue, DB record, env var, file path, translation key), verify it actually exists where the code expects it.
+  4. **Data shape is consistent end-to-end** — trace each value from origin through every transformation to consumption. Verify name, type, and unit are correct at every boundary. A field set in seconds but read as milliseconds ships broken behavior silently.
+  5. **Error and absence paths are handled** — at each layer, what happens if the call fails, returns null, or throws? Is the failure surfaced or swallowed?
 
 **Step C — Check for misalignment with the original task.** Read your subtask description again, then read your code. Ask: does this code do what was asked, or something adjacent to it? Common drift patterns:
 - Implementing the happy path but not the stated constraint (e.g., "must validate email format" but you validate only that it's non-empty)
