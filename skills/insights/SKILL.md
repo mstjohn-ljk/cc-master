@@ -65,7 +65,7 @@ Add these to kanban? Run /cc-master:kanban-add --from-insights
 
 After answering, append to `.cc-master/insights/sessions.json`:
 
-Create the directory and file if they don't exist. The file is a JSON array of session entries.
+Create the directory `.cc-master/insights/` if it doesn't exist. The file is a JSON array of session entries — read the existing array first (or start with `[]` if the file doesn't exist), append the new entry, then write back.
 
 ```json
 [
@@ -88,13 +88,32 @@ Create the directory and file if they don't exist. The file is a JSON array of s
 ]
 ```
 
-If there are task suggestions, also write/update `.cc-master/insights/pending-suggestions.json` — same format as the `suggested_tasks` array but accumulated across sessions. This is what `kanban-add --from-insights` reads.
+### Step 5: Write Pending Suggestions — Mandatory
 
-When writing to an existing file, read the current content first, append the new entry, then write back.
+**This step is mandatory whenever Step 3 produced task suggestions. Do not skip it. Do not proceed to Step 6 without completing it.**
 
-### Step 5: Print Footer
+If Step 3 produced zero task suggestions, skip this step.
 
-After your answer and any task suggestions:
+If Step 3 produced one or more task suggestions:
+
+1. Read `.cc-master/insights/pending-suggestions.json` using the Read tool. If the file doesn't exist, start with `[]`.
+2. Append each new suggestion from Step 3 to the array. Each suggestion must include: `title`, `description`, `priority`, `category`, `complexity`.
+3. Write the updated array back to `.cc-master/insights/pending-suggestions.json`.
+4. **Verify the write:** Read the file back and confirm the suggestions you just added are present. If they are not, write again.
+5. Print: `"<N> suggestion(s) written to .cc-master/insights/pending-suggestions.json"`
+
+This file is what `kanban-add --from-insights` reads. If this step is skipped, the suggestions are lost and the kanban-add command will report "No pending suggestions."
+
+### Step 6: Print Footer
+
+After your answer, any task suggestions, and the pending-suggestions write:
+
+```
+Session logged to .cc-master/insights/sessions.json
+Suggestions: <N> pending (run /cc-master:kanban-add --from-insights to add)
+```
+
+If there were no suggestions, print only:
 
 ```
 Session logged to .cc-master/insights/sessions.json
@@ -103,7 +122,9 @@ Session logged to .cc-master/insights/sessions.json
 ## What NOT To Do
 
 - Do not modify project files — insights is read-only (except .cc-master/insights/)
-- Do not create CC tasks directly — suggestions go to pending-suggestions.json for kanban-add
+- Do not create tasks directly in kanban.json — suggestions go to pending-suggestions.json for kanban-add
+- Do not skip writing pending-suggestions.json when task suggestions exist — this is the only way suggestions reach the kanban board
+- Do not print the footer before confirming pending-suggestions.json was written successfully
 - Do not make shallow claims — if you say something about the code, you've read it
 - Do not suggest tasks that duplicate existing roadmap features (check roadmap.json)
 - Do not re-suggest tasks that are already in pending-suggestions.json
