@@ -181,7 +181,7 @@ Output: .cc-master/research/<slug>.md
 Usage:  /cc-master:kanban [--detail] [--compact] [--filter <column>]
 ```
 
-**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually. Optionally creates GitHub Issues for team collaboration.
+**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually. Optionally creates GitHub Issues for team collaboration with auto-inferred labels and blocker cross-references.
 
 ```
 Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>] [--add-gh-issues]
@@ -192,6 +192,12 @@ Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>] [--ad
 | `--from-roadmap` | Import features from roadmap.json |
 | `--from-insights` | Import suggestions from insights sessions |
 | `--add-gh-issues` | Create a GitHub Issue for each task (requires `gh` CLI) |
+
+When `--add-gh-issues` is used, each issue gets:
+- **Type label** — `bug`, `enhancement`, or `documentation` (auto-inferred from source and keywords; manual mode asks explicitly)
+- **Priority label** — `priority:critical` / `priority:high` / `priority:normal` / `priority:low`
+- **Blocker references** — tasks with dependencies get a `blocker` label and cross-linked issue references
+- **Substantive body** — full description, acceptance criteria, priority rationale, and context (not just a kanban ID)
 
 ---
 
