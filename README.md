@@ -2,7 +2,7 @@
 
 Autonomous project management for Claude Code. Roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native.
 
-CC-Master is a Claude Code plugin that adds 30 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
+CC-Master is a Claude Code plugin that adds 35 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
 
 ## Install
 
@@ -86,7 +86,7 @@ Skills are organized by phase. See `docs/skills/` for full documentation on ever
 | [Planning](docs/skills/planning.md) | `competitors`, `roadmap`, `research` |
 | Task Management | `kanban`, `kanban-add` |
 | [Implementation](docs/skills/implementation.md) | `spec`, `build`, `scaffold`, `debug`, `hotfix`, `test-gen` |
-| [Quality](docs/skills/quality.md) | `qa-review`, `qa-fix`, `qa-loop`, `qa-ui-review`, `align-check`, `gap-check`, `api-contract`, `doc-review`, `perf-audit` |
+| [Quality](docs/skills/quality.md) | `qa-review`, `qa-fix`, `qa-loop`, `qa-ui-review`, `smoke-test`, `stub-hunt`, `api-payload-audit`, `config-audit`, `config-sync`, `align-check`, `gap-check`, `api-contract`, `doc-review`, `perf-audit` |
 | [Completion & Docs](docs/skills/completion.md) | `complete`, `pr-review`, `release-docs`, `dev-guide`, `user-guide`, `openapi-docs` |
 
 ---
@@ -278,6 +278,41 @@ Testing layers:
 - Plus: accessibility, responsive design, security headers, and UX pattern checks
 
 Pass threshold: score ≥ 80, zero critical findings.
+
+**`/cc-master:smoke-test`** — Post-deploy browser smoke test. Visits every discoverable route, intercepts all API calls, flags failures. Fast pass (2-3 minutes), not a full QA review.
+
+```
+Usage:  /cc-master:smoke-test <url> [--user <name> --pass <pw>] [--cookie <name=value>]
+Output: .cc-master/smoke-tests/<run-id>-report.json
+```
+
+**`/cc-master:stub-hunt`** — Live runtime stub and mock data detection. Opens the running app in a browser, navigates every page, detects placeholder content and developer artifacts visible to real users.
+
+```
+Usage:  /cc-master:stub-hunt <url> [--user <name> --pass <pw>] [--cookie <name=value>]
+Output: .cc-master/stub-hunt/<run-id>-report.json
+```
+
+**`/cc-master:api-payload-audit`** — Statically verify that every frontend API call sends all fields the backend requires. Catches "missing required parameter" bugs before deploy. No OpenAPI spec or running app needed.
+
+```
+Usage:  /cc-master:api-payload-audit [--scope frontend|backend|both]
+Output: .cc-master/payload-audit/<timestamp>-report.json
+```
+
+**`/cc-master:config-audit`** — Verify that every env var, secret, and config value referenced in code exists in the target environment configuration. Detect config drift between dev and prod.
+
+```
+Usage:  /cc-master:config-audit [--env prod|dev|staging|all]
+Output: .cc-master/config-audit/<timestamp>-report.json
+```
+
+**`/cc-master:config-sync`** — Compare infrastructure configs across environments. Flags divergences in reverse proxy routes, security headers, CORS, TLS, and rate limiting.
+
+```
+Usage:  /cc-master:config-sync
+Output: .cc-master/config-sync/<timestamp>-report.json
+```
 
 **`/cc-master:align-check`** — Three-way alignment: original task → spec → code. Catches when a spec accurately describes code that does the wrong thing.
 
