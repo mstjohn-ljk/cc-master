@@ -51,18 +51,32 @@ After creating each task in kanban.json, also create a corresponding GitHub Issu
 
 1. **Build the issue title:** Use the task's `subject` field exactly as-is.
 
-2. **Build the issue body:** Use the task's `description` field, plus a metadata footer:
+2. **Build the issue body.** The body must be a useful standalone description — a team member reading the GitHub Issue should understand what to do without access to the kanban board.
+
+   **Body structure:**
    ```
-   <task description>
+   ## Description
+   <task description — the full description from kanban.json>
+
+   ## Acceptance Criteria
+   - <criterion 1>
+   - <criterion 2>
+   (from metadata.acceptance_criteria if present; omit section if empty)
+
+   ## Priority
+   **<priority>** — <priority_rationale if present, otherwise omit this line>
+
+   ## Context
+   - Source: <roadmap feature "Add user authentication" | insights session | manual>
+   - Complexity: <low|medium|high> (if known)
+   <if feature_id present:>
+   - Roadmap feature: <feature_id>
 
    ---
-   **cc-master metadata** (do not edit)
-   - Kanban ID: #<id>
-   - Type: <bug|enhancement|documentation>
-   - Source: <roadmap|insights|manual>
-   - Priority: <priority>
-   - Feature ID: <feature_id or "none">
+   *Managed by [cc-master](https://github.com/mstjohn-ljk/cc-master) · kanban task <id>*
    ```
+
+   **IMPORTANT:** Never write bare `#<number>` for kanban IDs in the issue body — GitHub interprets `#N` as a reference to issue/PR N in the same repo. Always write `kanban task <id>` (no `#` prefix) or spell out `cc-master kanban task 5`.
 
 3. **Apply labels** (create labels if they don't exist):
    - **Issue type label** — inferred from task context:
@@ -76,20 +90,14 @@ After creating each task in kanban.json, also create a corresponding GitHub Issu
    - If competitor evidence exists: `competitor-informed`
 
 4. **Build the blocker/dependency section** in the issue body. If the task has a non-empty `blocked_by` array:
-   - For each blocker ID, check if that blocker task already has a `metadata.gh_issue_number` (from a previous creation in this same run or a prior run).
-   - If the blocker has a GitHub Issue: add `- Blocked by #<gh_issue_number>` to the body. GitHub auto-links these.
-   - If the blocker has no GitHub Issue yet: add `- Blocked by kanban #<kanban_id> (no GH issue yet)` as a plain text note.
-   - Place the blocker section between the description and the metadata footer:
+   - For each blocker ID, look up the blocker task in kanban.json to get its `subject` and check if it has `metadata.gh_issue_number`.
+   - If the blocker has a GitHub Issue: add a line referencing it by **repo-qualified format** to create a real GitHub link: `- Blocked by <owner/repo>#<gh_issue_number> — <blocker subject>`. The `<owner/repo>` prefix ensures GitHub renders it as a link without ambiguity.
+   - If the blocker has no GitHub Issue yet: add `- Blocked by "<blocker subject>" (kanban task <kanban_id>, no GH issue yet)`
+   - Place the section between Context and the metadata footer:
      ```
-     <task description>
-
-     **Blocked by:**
-     - #12
-     - #14
-
-     ---
-     **cc-master metadata** (do not edit)
-     ...
+     ## Blocked By
+     - Blocked by mstjohn-ljk/cc-master#12 — Add user authentication
+     - Blocked by "Setup database migrations" (kanban task 7, no GH issue yet)
      ```
 
 5. **Create the issue** via Bash:
@@ -332,3 +340,5 @@ For each missing label, create it:
 - Do not include credential values, secret content, or raw competitor data in GitHub Issue bodies — sanitize before posting
 - Do not fail the entire run if a single GitHub Issue creation fails — warn and continue
 - Do not create GitHub Issues for tasks that were skipped as duplicates
+- Do not write bare `#<number>` for kanban task IDs in GitHub Issue bodies — GitHub interprets `#N` as a PR/issue reference. Write `kanban task <id>` instead
+- Do not create GitHub Issues with just a kanban ID as the description — every issue must have a substantive description that makes sense standalone
