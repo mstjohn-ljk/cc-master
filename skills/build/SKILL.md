@@ -383,14 +383,25 @@ After a successful build, the project's understanding artifacts should reflect w
 5. If ALL features in a roadmap phase are now `"delivered"`, set that phase's `status` to `"complete"`.
 6. Write the updated roadmap.json back.
 
+**Close linked GitHub Issues:**
+
+1. For each task where verification passed, read the task from kanban.json and check for `metadata.gh_issue_number`.
+2. If `gh_issue_number` exists, close the issue with a comment via Bash:
+   ```bash
+   gh issue close <gh_issue_number> --comment "Completed by cc-master build. Kanban task <kanban_id> passed verification. Entering QA phase."
+   ```
+3. If `gh issue close` fails, print a warning (`"Warning: failed to close GitHub Issue <number>: <error>"`) and continue — this is non-blocking.
+4. If `gh` CLI is not available (not installed or not authenticated), skip silently — GitHub Issue management is optional.
+
 **Print what was updated:**
 ```
 Artifacts updated:
   discovery.json: +2 routes (POST /auth/register, POST /auth/login), +1 service (CryptoService)
   roadmap.json: feature "user-authentication" marked delivered (phase 1: 3/4 features delivered)
+  GitHub Issues: closed #12 (Add user authentication), closed #13 (Setup CI/CD)
 ```
 
-If nothing was updated (no discovery.json, no roadmap feature link), print nothing — skip silently.
+If nothing was updated (no discovery.json, no roadmap feature link, no GitHub Issues), print nothing — skip silently.
 
 ### Step 8: Chain Point / Autonomous Pipeline
 

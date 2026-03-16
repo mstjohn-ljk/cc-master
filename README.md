@@ -212,7 +212,7 @@ Output: .cc-master/specs/<task-id>.md
 Chains: → build (prompted or auto)
 ```
 
-**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models and marks linked roadmap features as delivered.
+**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models, marks linked roadmap features as delivered, and closes linked GitHub Issues (if created via `kanban-add --add-gh-issues`).
 
 ```
 Usage:  /cc-master:build <id> [--auto]
