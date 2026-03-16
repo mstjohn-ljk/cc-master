@@ -181,11 +181,17 @@ Output: .cc-master/research/<slug>.md
 Usage:  /cc-master:kanban [--detail] [--compact] [--filter <column>]
 ```
 
-**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually.
+**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually. Optionally creates GitHub Issues for team collaboration.
 
 ```
-Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>]
+Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>] [--add-gh-issues]
 ```
+
+| Flag | Effect |
+|------|--------|
+| `--from-roadmap` | Import features from roadmap.json |
+| `--from-insights` | Import suggestions from insights sessions |
+| `--add-gh-issues` | Create a GitHub Issue for each task (requires `gh` CLI) |
 
 ---
 
