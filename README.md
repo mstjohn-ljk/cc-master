@@ -181,11 +181,23 @@ Output: .cc-master/research/<slug>.md
 Usage:  /cc-master:kanban [--detail] [--compact] [--filter <column>]
 ```
 
-**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually.
+**`/cc-master:kanban-add`** — Add tasks from roadmap features, insights suggestions, or manually. Optionally creates GitHub Issues for team collaboration with auto-inferred labels and blocker cross-references.
 
 ```
-Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>]
+Usage:  /cc-master:kanban-add [--from-roadmap | --from-insights | <title>] [--add-gh-issues]
 ```
+
+| Flag | Effect |
+|------|--------|
+| `--from-roadmap` | Import features from roadmap.json |
+| `--from-insights` | Import suggestions from insights sessions |
+| `--add-gh-issues` | Create a GitHub Issue for each task (requires `gh` CLI) |
+
+When `--add-gh-issues` is used, each issue gets:
+- **Type label** — `bug`, `enhancement`, or `documentation` (auto-inferred from source and keywords; manual mode asks explicitly)
+- **Priority label** — `priority:critical` / `priority:high` / `priority:normal` / `priority:low`
+- **Blocker references** — tasks with dependencies get a `blocker` label and cross-linked issue references
+- **Substantive body** — full description, acceptance criteria, priority rationale, and context (not just a kanban ID)
 
 ---
 
@@ -200,7 +212,7 @@ Output: .cc-master/specs/<task-id>.md
 Chains: → build (prompted or auto)
 ```
 
-**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models and marks linked roadmap features as delivered.
+**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models, marks linked roadmap features as delivered, and closes linked GitHub Issues (if created via `kanban-add --add-gh-issues`).
 
 ```
 Usage:  /cc-master:build <id> [--auto]

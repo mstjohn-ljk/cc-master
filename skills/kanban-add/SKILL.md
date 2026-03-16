@@ -1,11 +1,11 @@
 ---
 name: kanban-add
-description: Add tasks to the kanban board. Supports three modes — import from roadmap, import from insights suggestions, or manual creation. Writes to .cc-master/kanban.json with structured metadata.
+description: Add tasks to the kanban board. Supports three modes — import from roadmap, import from insights suggestions, or manual creation. Writes to .cc-master/kanban.json with structured metadata. Optional --add-gh-issues flag creates GitHub Issues for team collaboration.
 ---
 
 # cc-master:kanban-add — Task Injection
 
-Add tasks to the kanban board by writing to `.cc-master/kanban.json`. Three modes: from roadmap, from insights, or manual.
+Add tasks to the kanban board by writing to `.cc-master/kanban.json`. Three modes: from roadmap, from insights, or manual. Optionally create GitHub Issues for each task with `--add-gh-issues`.
 
 ## Task Persistence Protocol
 
@@ -36,6 +36,107 @@ Metadata is stored as a structured object on each task in kanban.json — NOT as
 - `priority_rationale`: string explaining priority elevation, or `""`
 
 The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
+
+## Input Validation Rules
+
+- **`--add-gh-issues` flag:** No value required. When present, each task created in kanban.json is also created as a GitHub Issue via `gh issue create`. Strip this flag before other argument parsing and remember it for the GitHub Issue Creation step.
+- **`gh` CLI prerequisite:** If `--add-gh-issues` is present, verify `gh` is installed and authenticated before creating any tasks. Run `gh auth status` via Bash. If it fails, print: `"gh CLI is not installed or not authenticated. Run 'gh auth login' first, or remove --add-gh-issues."` and stop.
+- **Repository detection:** If `--add-gh-issues` is present, verify the project is a git repository with a GitHub remote. Run `gh repo view --json nameWithOwner -q .nameWithOwner` via Bash. If it fails, print: `"No GitHub repository detected. --add-gh-issues requires a GitHub remote."` and stop.
+
+## GitHub Issue Creation
+
+**This section applies to ALL three modes (roadmap, insights, manual) when `--add-gh-issues` is present.**
+
+After creating each task in kanban.json, also create a corresponding GitHub Issue:
+
+1. **Build the issue title:** Use the task's `subject` field exactly as-is.
+
+2. **Build the issue body.** The body must be a useful standalone description — a team member reading the GitHub Issue should understand what to do without access to the kanban board.
+
+   **Body structure:**
+   ```
+   ## Description
+   <task description — the full description from kanban.json>
+
+   ## Acceptance Criteria
+   - <criterion 1>
+   - <criterion 2>
+   (from metadata.acceptance_criteria if present; omit section if empty)
+
+   ## Priority
+   **<priority>** — <priority_rationale if present, otherwise omit this line>
+
+   ## Context
+   - Source: <roadmap feature "Add user authentication" | insights session | manual>
+   - Complexity: <low|medium|high> (if known)
+   <if feature_id present:>
+   - Roadmap feature: <feature_id>
+
+   ---
+   *Managed by [cc-master](https://github.com/mstjohn-ljk/cc-master) · kanban task <id>*
+   ```
+
+   **IMPORTANT:** Never write bare `#<number>` for kanban IDs in the issue body — GitHub interprets `#N` as a reference to issue/PR N in the same repo. Always write `kanban task <id>` (no `#` prefix) or spell out `cc-master kanban task 5`.
+
+3. **Apply labels** (create labels if they don't exist):
+   - **Issue type label** — inferred from task context:
+     - `bug` — task subject starts with `[UI]`, `[SMOKE]`, `[STUB]`, `[PAYLOAD]`, `[CONFIG]`, `[INFRA]`, `[PERF]`, or metadata.source is `"qa-ui-review"`, `"smoke-test"`, `"stub-hunt"`, `"api-payload-audit"`, `"config-audit"`, `"config-sync"`, `"perf-audit"`; OR subject/description contains keywords: `fix`, `broken`, `crash`, `error`, `fail`, `regression`, `404`, `500`
+     - `enhancement` — task source is `"roadmap"`, OR subject/description contains keywords: `add`, `implement`, `create`, `new`, `support`, `enable`, `improve`
+     - `documentation` — subject/description contains keywords: `doc`, `readme`, `changelog`, `guide`
+     - `enhancement` — fallback when no other type matches
+   - For **manual mode**: after gathering priority, also ask the user: `"Issue type? (bug / enhancement / documentation) [default: enhancement]"` — use their answer instead of inference.
+   - Priority label: `priority:critical`, `priority:high`, `priority:normal`, or `priority:low`
+   - Source label: `cc-master:roadmap`, `cc-master:insights`, or `cc-master:manual`
+   - If competitor evidence exists: `competitor-informed`
+
+4. **Build the blocker/dependency section** in the issue body. If the task has a non-empty `blocked_by` array:
+   - For each blocker ID, look up the blocker task in kanban.json to get its `subject` and check if it has `metadata.gh_issue_number`.
+   - If the blocker has a GitHub Issue: add a line referencing it by **repo-qualified format** to create a real GitHub link: `- Blocked by <owner/repo>#<gh_issue_number> — <blocker subject>`. The `<owner/repo>` prefix ensures GitHub renders it as a link without ambiguity.
+   - If the blocker has no GitHub Issue yet: add `- Blocked by "<blocker subject>" (kanban task <kanban_id>, no GH issue yet)`
+   - Place the section between Context and the metadata footer:
+     ```
+     ## Blocked By
+     - Blocked by mstjohn-ljk/cc-master#12 — Add user authentication
+     - Blocked by "Setup database migrations" (kanban task 7, no GH issue yet)
+     ```
+
+5. **Create the issue** via Bash:
+   ```bash
+   gh issue create --title "<title>" --body "<body>" --label "<label1>,<label2>"
+   ```
+   Capture the returned issue URL and number.
+
+6. **Link back:** After the issue is created, update the task in kanban.json — set `metadata.gh_issue_number` to the issue number and `metadata.gh_issue_url` to the URL.
+
+7. **Error handling:** If `gh issue create` fails for any task, print a warning (`"Warning: GitHub Issue creation failed for task #<id>: <error>"`) and continue with the next task. The kanban.json task is still created — the GitHub Issue is supplemental.
+
+**Label creation:** Before creating the first issue, check if the required labels exist:
+```bash
+gh label list --json name -q '.[].name'
+```
+For each missing label, create it:
+
+*Issue type labels:*
+- `bug` → color `D73A4A` (red) — most repos already have this
+- `enhancement` → color `A2EEEF` (teal) — most repos already have this
+- `documentation` → color `0075CA` (blue)
+
+*Priority labels:*
+- `priority:critical` → color `B60205` (dark red)
+- `priority:high` → color `D93F0B` (orange)
+- `priority:normal` → color `0E8A16` (green)
+- `priority:low` → color `C5DEF5` (light blue)
+
+*Status labels:*
+- `blocker` → color `B60205` (dark red) — applied when task has a non-empty `blocked_by` array, signaling this issue cannot start until its dependencies close
+
+*Source labels:*
+- `cc-master:roadmap` → color `5319E7` (purple)
+- `cc-master:insights` → color `1D76DB` (blue)
+- `cc-master:manual` → color `FBCA04` (yellow)
+- `competitor-informed` → color `F9D0C4` (peach)
+
+**Note:** `bug`, `enhancement`, and `documentation` are GitHub defaults — check before creating to avoid duplicates. Use `gh label create` only for labels not already present.
 
 ## Mode 1: From Roadmap
 
@@ -136,7 +237,9 @@ The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
 
 7. Update `.cc-master/roadmap.json` — change each added feature's status from `idea` to `planned`. Use the Read tool to get current content, then Write tool to save updated version.
 
-8. Print summary:
+8. **If `--add-gh-issues` was present:** Run the GitHub Issue Creation step for each task created above.
+
+9. Print summary:
    ```
    Added 3 tasks from roadmap:
      #1 Add user authentication        P:high   [R][C]
@@ -147,6 +250,17 @@ The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
    ```
 
    Show the `[C]` badge in the summary for any task that has `competitor_insight_ids`.
+
+   **If `--add-gh-issues` was present**, append the GitHub Issue column:
+   ```
+   Added 3 tasks from roadmap:
+     #1 Add user authentication        P:high   [R][C]  → GH #12
+     #2 Setup CI/CD pipeline           P:high   [R]     → GH #13
+     #3 Add structured logging         P:low    [R]     → GH #14
+
+   GitHub Issues: 3 created
+   Run /cc-master:kanban to see the board.
+   ```
 
 ## Mode 2: From Insights
 
@@ -168,7 +282,9 @@ The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
 
 5. Remove added suggestions from `pending-suggestions.json`.
 
-6. Print summary.
+6. **If `--add-gh-issues` was present:** Run the GitHub Issue Creation step for each task created above.
+
+7. Print summary. If `--add-gh-issues` was present, include `→ GH #<number>` per task and a `GitHub Issues: N created` footer.
 
 ## Mode 3: Manual
 
@@ -195,11 +311,22 @@ The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
    - Set `created_at` and `updated_at` to current ISO timestamp
    - Write kanban.json back
 
-4. Print confirmation:
+4. **If `--add-gh-issues` was present:** Run the GitHub Issue Creation step for the task created above.
+
+5. Print confirmation:
    ```
    Added task:
      #4 Fix login redirect              P:high   [M]
 
+   Run /cc-master:kanban to see the board.
+   ```
+
+   If `--add-gh-issues` was present:
+   ```
+   Added task:
+     #4 Fix login redirect              P:high   [M]  → GH #15
+
+   GitHub Issues: 1 created
    Run /cc-master:kanban to see the board.
    ```
 
@@ -209,3 +336,9 @@ The `[C]` badge is shown when `competitor_insight_ids` is present and non-empty.
 - Do not modify existing tasks — only create new ones
 - Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively
 - Do not create duplicate tasks — if importing from roadmap, check kanban.json for existing tasks with matching `metadata.feature_id`
+- Do not create GitHub Issues without `--add-gh-issues` — the flag must be explicitly passed
+- Do not include credential values, secret content, or raw competitor data in GitHub Issue bodies — sanitize before posting
+- Do not fail the entire run if a single GitHub Issue creation fails — warn and continue
+- Do not create GitHub Issues for tasks that were skipped as duplicates
+- Do not write bare `#<number>` for kanban task IDs in GitHub Issue bodies — GitHub interprets `#N` as a PR/issue reference. Write `kanban task <id>` instead
+- Do not create GitHub Issues with just a kanban ID as the description — every issue must have a substantive description that makes sense standalone

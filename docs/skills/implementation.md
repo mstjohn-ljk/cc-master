@@ -29,6 +29,7 @@ Uses **deep trace verification** during agent self-review: before marking a subt
 On successful build, automatically:
 - **Updates `discovery.json`** with new routes, services, middleware, models, and integrations added by the build
 - **Marks linked roadmap features as delivered** when the task has a `feature_id` in its metadata
+- **Closes linked GitHub Issues** with a completion comment (if created via `kanban-add --add-gh-issues`)
 
 ```
 Usage:  /cc-master:build <id> [--auto]
