@@ -262,12 +262,20 @@ Usage:  /cc-master:qa-loop <id> [--auto] [--no-chain]
 Chains: → complete (prompted or auto, unless --no-chain)
 ```
 
-**`/cc-master:qa-ui-review`** — End-to-end UI testing via Playwright. Exercises user flows, accessibility, responsive design, client-side security. Requires Playwright MCP server.
+**`/cc-master:qa-ui-review`** — End-to-end UI testing via Playwright. Goes beyond "does it render" to verify that every form, modal, and action actually works end-to-end. Includes API health monitoring, cross-page consistency checks, runtime config validation, and empty-state testing. Requires Playwright MCP server.
 
 ```
 Usage:  /cc-master:qa-ui-review <url> [<task-id>] [--spec <id>] [--auth-env <file>] [--flows <list>]
 Output: .cc-master/ui-reviews/<review-id>-review.json + screenshots/
 ```
+
+Testing layers:
+- **API Health Gate** — intercepts all fetch/XHR calls, flags 4xx/5xx responses, timeouts, and empty responses
+- **Action Testing** — submits every form and modal with test data, verifies both API response and UI state update
+- **Cross-Page Consistency** — detects when the same API endpoint returns different results on different pages
+- **Runtime Config** — catches `"undefined"`, `"CHANGE_ME"`, `"TODO"`, and other stub phrases rendered in the UI
+- **Error Path Testing** — verifies empty states exist with working CTAs (not just blank pages)
+- Plus: accessibility, responsive design, security headers, and UX pattern checks
 
 Pass threshold: score ≥ 80, zero critical findings.
 

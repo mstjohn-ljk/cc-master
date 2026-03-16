@@ -50,7 +50,7 @@ Chains: → complete (prompted or --auto, unless --no-chain)
 
 ## `/cc-master:qa-ui-review`
 
-End-to-end UI testing via Playwright. Exercises user flows, reviews look & feel, accessibility, responsive design, and client-side security. Creates kanban tasks for every finding with `[Q]` badges. Requires Playwright MCP server.
+End-to-end UI testing via Playwright. Goes beyond rendering checks to verify that every interactive element actually works. Creates kanban tasks for every finding with `[Q]` badges. Requires Playwright MCP server.
 
 ```
 Usage:  /cc-master:qa-ui-review <url> [<task-id>] [--spec <id>] [--auth-env <file>] [--flows <list>]
@@ -59,6 +59,20 @@ Output: .cc-master/ui-reviews/<review-id>-review.json
 ```
 
 Available flows: `navigation`, `forms`, `auth`, `crud`, `responsive`, `error-handling`. Pass threshold: score ≥ 80 and zero critical findings.
+
+**Testing layers (in execution order):**
+
+| Step | Layer | What it catches |
+|------|-------|-----------------|
+| 3b | API Health Gate | 4xx/5xx responses, timeouts, empty responses on every page load |
+| 4 | User Flow Testing | Navigation, form submission, auth, CRUD, error handling |
+| 4b | Action Testing | Forms/modals that render but fail on submit; API success with stale UI |
+| 4c | Cross-Page Consistency | Same endpoint returning different results on different pages |
+| 4d | Runtime Config | `"undefined"`, `"CHANGE_ME"`, `"TODO"` in rendered output; missing env vars |
+| 5 | Look & Feel / UX | Accessibility, responsive breakpoints, visual consistency |
+| 5b | Error Path Testing | Missing empty states, broken CTAs, infinite loading on zero data |
+
+**Finding categories:** `e2e`, `api`, `security`, `config`, `empty-state`, `accessibility`, `responsive`, `ux`, `performance`
 
 ---
 
