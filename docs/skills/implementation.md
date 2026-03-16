@@ -26,6 +26,10 @@ Implements in an isolated git worktree. Groups subtasks into dependency waves an
 
 Uses **deep trace verification** during agent self-review: before marking a subtask complete, the agent must trace the implementation to an actual leaf.
 
+On successful build, automatically:
+- **Updates `discovery.json`** with new routes, services, middleware, models, and integrations added by the build
+- **Marks linked roadmap features as delivered** when the task has a `feature_id` in its metadata
+
 ```
 Usage:  /cc-master:build <id> [--auto]
         /cc-master:build 3,5,7         # comma-separated (shared worktree)

@@ -200,7 +200,7 @@ Output: .cc-master/specs/<task-id>.md
 Chains: → build (prompted or auto)
 ```
 
-**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete.
+**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models and marks linked roadmap features as delivered.
 
 ```
 Usage:  /cc-master:build <id> [--auto]
@@ -380,7 +380,7 @@ Skills compose through JSON artifacts:
 - `roadmap` writes `roadmap.json` → `kanban-add` reads it
 - `kanban-add` resolves competitor evidence, creates tasks → `kanban` renders them
 - `spec` writes spec files → `build` reads them
-- `build` produces code in worktrees → `qa-review` validates it with deep trace verification
+- `build` produces code in worktrees, updates `discovery.json` and marks roadmap features delivered → `qa-review` validates it with deep trace verification
 - `qa-fix` fixes findings → `qa-review` re-validates
 - `complete` creates a PR (or merges with explicit `--merge`) after QA passes
 

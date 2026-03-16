@@ -351,6 +351,47 @@ Review the failures and either fix manually or re-run /cc-master:build.
 - If its verification passed: set metadata.phase = "qa", update `updated_at`
 - If its verification failed: keep as `in_progress` with failure notes in description, update `updated_at`
 
+### Step 7b: Update Discovery and Roadmap
+
+**Only execute this step for tasks where verification PASSED in Step 6.**
+
+After a successful build, the project's understanding artifacts should reflect what was just built.
+
+**Update discovery.json:**
+
+1. Read `.cc-master/discovery.json`. If it doesn't exist, skip this step entirely.
+2. Determine what changed: collect all files modified/created by the build (from the verification output in Step 6).
+3. For each major addition (new service, new route, new middleware, new data model, new integration):
+   - Add or update the relevant section in discovery.json:
+     - New routes → add to the `routes` or `endpoints` section
+     - New services/modules → add to the `services` or `modules` section
+     - New middleware → add to the `middleware` section
+     - New data models/schemas → add to the `models` or `schemas` section
+     - New external integrations → add to the `integrations` section
+   - Use the same structure and field names as existing entries in each section.
+   - Include: name, file path, brief description (1 line), and key dependencies.
+4. Do NOT rewrite discovery.json from scratch — only append/update entries relevant to this build.
+5. Do NOT remove existing entries — discovery is additive. If an existing entry was modified, update its description and file path.
+6. Set `discovery.json`'s top-level `updated_at` field to the current ISO-8601 timestamp.
+
+**Update roadmap.json:**
+
+1. Read `.cc-master/roadmap.json`. If it doesn't exist, skip this section.
+2. For each completed task, check if `metadata.feature_id` exists in kanban.json for that task.
+3. If a `feature_id` is present, find the matching feature in `roadmap.json` (by `id` field in the features array).
+4. If found, set that feature's `status` to `"delivered"` and `delivered_at` to the current ISO-8601 timestamp.
+5. If ALL features in a roadmap phase are now `"delivered"`, set that phase's `status` to `"complete"`.
+6. Write the updated roadmap.json back.
+
+**Print what was updated:**
+```
+Artifacts updated:
+  discovery.json: +2 routes (POST /auth/register, POST /auth/login), +1 service (CryptoService)
+  roadmap.json: feature "user-authentication" marked delivered (phase 1: 3/4 features delivered)
+```
+
+If nothing was updated (no discovery.json, no roadmap feature link), print nothing — skip silently.
+
 ### Step 8: Chain Point / Autonomous Pipeline
 
 **Single-task mode — Chain Point (unchanged):**
