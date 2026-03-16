@@ -58,39 +58,77 @@ After creating each task in kanban.json, also create a corresponding GitHub Issu
    ---
    **cc-master metadata** (do not edit)
    - Kanban ID: #<id>
+   - Type: <bug|enhancement|documentation>
    - Source: <roadmap|insights|manual>
    - Priority: <priority>
    - Feature ID: <feature_id or "none">
    ```
 
 3. **Apply labels** (create labels if they don't exist):
+   - **Issue type label** — inferred from task context:
+     - `bug` — task subject starts with `[UI]`, `[SMOKE]`, `[STUB]`, `[PAYLOAD]`, `[CONFIG]`, `[INFRA]`, `[PERF]`, or metadata.source is `"qa-ui-review"`, `"smoke-test"`, `"stub-hunt"`, `"api-payload-audit"`, `"config-audit"`, `"config-sync"`, `"perf-audit"`; OR subject/description contains keywords: `fix`, `broken`, `crash`, `error`, `fail`, `regression`, `404`, `500`
+     - `enhancement` — task source is `"roadmap"`, OR subject/description contains keywords: `add`, `implement`, `create`, `new`, `support`, `enable`, `improve`
+     - `documentation` — subject/description contains keywords: `doc`, `readme`, `changelog`, `guide`
+     - `enhancement` — fallback when no other type matches
+   - For **manual mode**: after gathering priority, also ask the user: `"Issue type? (bug / enhancement / documentation) [default: enhancement]"` — use their answer instead of inference.
    - Priority label: `priority:critical`, `priority:high`, `priority:normal`, or `priority:low`
    - Source label: `cc-master:roadmap`, `cc-master:insights`, or `cc-master:manual`
    - If competitor evidence exists: `competitor-informed`
 
-4. **Create the issue** via Bash:
+4. **Build the blocker/dependency section** in the issue body. If the task has a non-empty `blocked_by` array:
+   - For each blocker ID, check if that blocker task already has a `metadata.gh_issue_number` (from a previous creation in this same run or a prior run).
+   - If the blocker has a GitHub Issue: add `- Blocked by #<gh_issue_number>` to the body. GitHub auto-links these.
+   - If the blocker has no GitHub Issue yet: add `- Blocked by kanban #<kanban_id> (no GH issue yet)` as a plain text note.
+   - Place the blocker section between the description and the metadata footer:
+     ```
+     <task description>
+
+     **Blocked by:**
+     - #12
+     - #14
+
+     ---
+     **cc-master metadata** (do not edit)
+     ...
+     ```
+
+5. **Create the issue** via Bash:
    ```bash
    gh issue create --title "<title>" --body "<body>" --label "<label1>,<label2>"
    ```
    Capture the returned issue URL and number.
 
-5. **Link back:** After the issue is created, update the task in kanban.json — set `metadata.gh_issue_number` to the issue number and `metadata.gh_issue_url` to the URL.
+6. **Link back:** After the issue is created, update the task in kanban.json — set `metadata.gh_issue_number` to the issue number and `metadata.gh_issue_url` to the URL.
 
-6. **Error handling:** If `gh issue create` fails for any task, print a warning (`"Warning: GitHub Issue creation failed for task #<id>: <error>"`) and continue with the next task. The kanban.json task is still created — the GitHub Issue is supplemental.
+7. **Error handling:** If `gh issue create` fails for any task, print a warning (`"Warning: GitHub Issue creation failed for task #<id>: <error>"`) and continue with the next task. The kanban.json task is still created — the GitHub Issue is supplemental.
 
 **Label creation:** Before creating the first issue, check if the required labels exist:
 ```bash
 gh label list --json name -q '.[].name'
 ```
 For each missing label, create it:
-- `priority:critical` → color `B60205` (red)
+
+*Issue type labels:*
+- `bug` → color `D73A4A` (red) — most repos already have this
+- `enhancement` → color `A2EEEF` (teal) — most repos already have this
+- `documentation` → color `0075CA` (blue)
+
+*Priority labels:*
+- `priority:critical` → color `B60205` (dark red)
 - `priority:high` → color `D93F0B` (orange)
 - `priority:normal` → color `0E8A16` (green)
 - `priority:low` → color `C5DEF5` (light blue)
+
+*Status labels:*
+- `blocker` → color `B60205` (dark red) — applied when task has a non-empty `blocked_by` array, signaling this issue cannot start until its dependencies close
+
+*Source labels:*
 - `cc-master:roadmap` → color `5319E7` (purple)
 - `cc-master:insights` → color `1D76DB` (blue)
 - `cc-master:manual` → color `FBCA04` (yellow)
 - `competitor-informed` → color `F9D0C4` (peach)
+
+**Note:** `bug`, `enhancement`, and `documentation` are GitHub defaults — check before creating to avoid duplicates. Use `gh label create` only for labels not already present.
 
 ## Mode 1: From Roadmap
 
