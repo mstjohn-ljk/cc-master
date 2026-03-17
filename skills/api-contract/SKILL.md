@@ -1,13 +1,20 @@
 ---
 name: api-contract
-description: Frontend/backend API contract verification. Derives the contract from actual source code on both sides, cross-references every frontend call against every backend route through proxy layers, and reports mismatches. No OpenAPI spec required. Standalone.
+description: Frontend/backend API contract verification with full data shape tracing. Derives the contract from source code, cross-references routes and proxy layers, then traces field shapes across all layers — database schema → backend serialization → HTTP response → frontend field access. Catches silent null bugs from naming mismatches, NOT NULL violations, and inter-service DTO drift. No OpenAPI spec required. Standalone.
 ---
 
 # cc-master:api-contract — Frontend/Backend Contract Verification
 
-Derive the API contract from actual source code on both sides — no OpenAPI spec required (uses one as supplemental input if it exists). Cross-reference every frontend API call against every backend route, tracing through proxy layers (nginx rewrites, applicationContextPath, sub-router mounts) to verify the full externally-visible path. Report every mismatch with exact file:line references.
+Derive the API contract from actual source code on both sides — no OpenAPI spec required (uses one as supplemental input if it exists). Cross-reference every frontend API call against every backend route, tracing through proxy layers (nginx rewrites, applicationContextPath, sub-router mounts) to verify the full externally-visible path. Then trace field shapes across all layers — database schema → backend model/serialization → HTTP response → frontend field access — to catch the silent bugs that route-level checks miss.
 
 This is different from OpenAPI-based validators that trust the spec. This skill trusts the source code and treats the spec as a secondary input that may itself be stale.
+
+**What it catches that route-level tools don't:**
+- Backend serializes `name` but frontend reads `domain` → undefined at runtime
+- Backend sends `created_at` (snake_case) but frontend reads `createdAt` → null without a transformer
+- Service A sends `owner_id` but Service B's client DTO expects `ownerId` → silent null
+- INSERT omits a NOT NULL column → constraint violation at runtime
+- Query references column `registrar` but model maps to `registrar_id` → wrong data
 
 ## Input Validation Rules
 
@@ -157,9 +164,213 @@ This step runs as coordinator (not dispatched to an agent).
 | OpenAPI/source disagreement | OpenAPI spec path/method/fields differ from source code | MEDIUM |
 | Pagination format mismatch | Frontend sends offset/limit but backend expects cursor, or vice versa | MEDIUM |
 
+**Field shape findings** (from Steps 4b–4f) are added to the same scoring:
+
+| Check | Source Step | Severity |
+|-------|------------|----------|
+| Frontend reads field missing from response shape | 4d | CRITICAL |
+| Inter-service wire name mismatch | 4e | CRITICAL |
+| Inter-service missing field | 4e | CRITICAL |
+| NOT NULL column omitted from INSERT | 4f | CRITICAL |
+| DB column name ≠ model/query field name | 4f | CRITICAL |
+| Response field casing mismatch (no global transformer) | 4d | HIGH |
+| Nested path mismatch | 4d | HIGH |
+| NOT NULL field set to explicit null | 4f | HIGH |
+| Complex object → non-JSONB column | 4f | HIGH |
+| Model field in query but column missing from migrations | 4f | HIGH |
+| Inter-service type mismatch | 4e | HIGH |
+| Response type shape mismatch (object vs string) | 4d | HIGH |
+| Fallback chain in frontend (indicates naming instability) | 4d | MEDIUM |
+| String ↔ numeric/temporal column type mismatch | 4f | MEDIUM |
+| Frontend ignores response fields | 4d | LOW |
+| Inter-service extra server fields | 4e | LOW |
+
 **Scoring:** Start at 100. CRITICAL: -20. HIGH: -10. MEDIUM: -5. LOW: -2. Floor at 0.
 
 **Pass threshold: score >= 70 AND zero CRITICAL findings.**
+
+### Step 4b: Field Shape Tracing — Backend Response Shape Detection
+
+For each backend endpoint identified in Step 2, determine the **actual JSON field names** the backend serializes in the response — not the Java/Python/Go field names, but the names that appear in the wire JSON.
+
+**Dispatch an Agent** to perform this analysis. The agent reads every response DTO/model class identified in Step 2 and traces serialization behavior.
+
+**Serialization annotation detection (lookup table):**
+
+| Ecosystem | Override Annotation | Default Strategy |
+|-----------|--------------------|--------------------|
+| Java/Jackson | `@JsonProperty("wire_name")`, `@JsonAlias`, `@JsonNaming` | camelCase (default), snake_case if `PropertyNamingStrategies.SNAKE_CASE` configured |
+| Java/Gson | `@SerializedName("wire_name")` | matches field name |
+| Java/JPA | `@Column(name = "col")` — DB only, not JSON | N/A |
+| Python/Pydantic | `Field(alias="wire_name")`, `model_config = ConfigDict(alias_generator=to_camel)` | matches field name |
+| Python/DRF | `source="related.field"` on serializer fields | matches field name |
+| Python/marshmallow | `data_key="wire_name"` | matches field name |
+| TypeScript/class-transformer | `@Expose({ name: "wire_name" })`, `@Transform` | matches property name |
+| Go | struct tag `json:"wire_name"`, `json:"name,omitempty"` | matches field name |
+| Rust/serde | `#[serde(rename = "wire_name")]`, `#[serde(rename_all = "camelCase")]` | matches field name |
+
+**For each response DTO:**
+
+1. Read the class/struct/type definition.
+2. For each field, determine the wire name:
+   - If an override annotation exists → use the annotated name
+   - If a class-level naming strategy exists → apply it
+   - Otherwise → use the field name as-is
+3. Record the field type (string, number, boolean, array, nested object).
+4. **For nested objects:** recursively trace into the child type and build the full field tree. Stop recursion at 3 levels deep or at primitive/collection-of-primitive types.
+5. **For generic wrappers** (e.g., `Response<T>`, `Page<T>`, `ApiResponse<T>`): unwrap the generic and trace the inner type. Record the wrapper structure (e.g., `{ data: T, meta: { page, total } }`).
+
+**Output per endpoint:**
+```json
+{
+  "endpoint": "GET /api/v1/users",
+  "responseShape": {
+    "id": "string",
+    "email": "string",
+    "created_at": "string",
+    "profile": {
+      "display_name": "string",
+      "avatar_url": "string"
+    }
+  },
+  "namingStrategy": "snake_case",
+  "sourceFile": "UserDto.java:12",
+  "annotations": ["@JsonProperty on 2 fields", "@JsonNaming(SNAKE_CASE)"]
+}
+```
+
+### Step 4c: Field Shape Tracing — Frontend Response Consumption Detection
+
+For each frontend API call identified in Step 3, determine what field names the frontend code **actually accesses** from the response.
+
+**Dispatch an Agent** to perform this analysis. The agent traces response handling for every API call.
+
+**Detection patterns:**
+
+1. **Destructuring:** `const { id, email, name } = response.data` or `const { data: { users } } = await axios.get(...)`
+2. **Dot access:** `user.display_name`, `response.data.profile.avatarUrl`, `item.created_at`
+3. **Bracket access:** `user['display-name']`, `data[fieldName]` (dynamic — record as unknown)
+4. **Map/forEach iteration:** `users.map(u => u.email)` — the callback accesses `email`
+5. **Spread into component props:** `<UserCard {...user} />` — trace into `UserCard` props to find accessed fields
+6. **Assignment to state:** `setUser(response.data)` — trace into all subsequent accesses of `user` state
+7. **Normalizer/transform functions:** `const normalized = { domain: r.domain || r.domain_name || r.name }` — records that the frontend tries `domain`, then `domain_name`, then `name` as fallbacks
+
+**Response unwrapping patterns to account for:**
+- `response.data` (axios)
+- `response.json()` (fetch)
+- `response.body` (some HTTP clients)
+- `res.data.items`, `res.data.results`, `res.data.content` (paginated responses)
+
+**Output per API call:**
+```json
+{
+  "endpoint": "GET /api/v1/users",
+  "fieldsAccessed": ["id", "email", "displayName", "profile.avatarUrl", "createdAt"],
+  "fallbackChains": [{"target": "domain", "tried": ["domain", "domain_name", "name"]}],
+  "unwrapPattern": "response.data",
+  "sourceFile": "UserList.tsx:34"
+}
+```
+
+### Step 4d: Cross-Reference Response Shapes
+
+For each matched endpoint pair (from Step 4), compare the backend response shape (Step 4b) against the frontend field access (Step 4c):
+
+| Check | Condition | Severity |
+|-------|-----------|----------|
+| Frontend reads missing field | Field the frontend accesses does not exist in backend response shape | CRITICAL |
+| Casing mismatch | Backend sends `created_at`, frontend reads `createdAt` (or vice versa) with no global transformer | HIGH |
+| Nested path mismatch | Frontend reads `profile.avatarUrl` but backend sends `profile.avatar_url` | HIGH |
+| Fallback chain needed | Frontend uses `r.domain \|\| r.domain_name` — indicates known instability in field naming | MEDIUM |
+| Frontend ignores fields | Backend sends fields that frontend never reads | LOW (informational) |
+| Type shape mismatch | Backend sends an object but frontend accesses it as a string (or vice versa) | HIGH |
+
+**Global transformer detection:** Before flagging casing mismatches, check if the project has a global response transformer:
+- axios interceptor that converts snake_case to camelCase (e.g., `camelcaseKeys` library in response interceptor)
+- API client wrapper that applies `humps`, `camelcase-keys`, or similar library
+- Framework-level configuration (e.g., Angular `HttpClient` with custom interceptor)
+
+If a global transformer is detected, adjust field comparisons to account for the transformation. Print: `"Global response transformer detected: <description>. Adjusting field name comparisons."`
+
+### Step 4e: Inter-Service DTO Alignment
+
+**Only execute this step if the project has multiple backend services that call each other.**
+
+Detection: Look for HTTP client classes/functions that make calls to internal service URLs (e.g., `http://user-service:8080`, `http://localhost:8081`, service discovery URLs, `@FeignClient`, `WebClient.create()`, `RestTemplate`, `httpx.AsyncClient` calling sibling services).
+
+**For each inter-service call:**
+
+1. **Identify the server-side response DTO** — the class the target service serializes from (already extracted in Step 4b for that service's endpoint).
+2. **Identify the client-side response DTO** — the class the calling service deserializes into.
+3. **Compare field by field**, applying the same serialization annotation logic from Step 4b to both sides:
+   - Server's `@JsonProperty("owner_id")` → wire name `owner_id`
+   - Client's `@JsonProperty("ownerId")` → expects wire name `ownerId`
+   - MISMATCH: `owner_id` ≠ `ownerId` → field will silently deserialize as null
+
+| Check | Condition | Severity |
+|-------|-----------|----------|
+| Wire name mismatch | Server sends `field_a`, client expects `field_b` for the same logical field | CRITICAL |
+| Missing field | Server response has no field matching what client expects | CRITICAL |
+| Type mismatch | Server sends string, client deserializes as number | HIGH |
+| Extra server fields | Server sends fields client doesn't map | LOW |
+
+**If the project is a monolith or single-service:** Skip this step silently.
+
+### Step 4f: Database Schema → Model Alignment
+
+**Discover database schema from migration files.** Search for:
+
+| Format | File Patterns | Parse Strategy |
+|--------|--------------|----------------|
+| Raw SQL | `*.sql` in `migrations/`, `db/migrate/`, `flyway/`, `sql/` | Parse `CREATE TABLE`, `ALTER TABLE ADD COLUMN` statements |
+| Liquibase | `*.xml`, `*.yaml` in `migrations/`, `changelog/` | Parse `<createTable>`, `<addColumn>`, `<addNotNullConstraint>` |
+| Alembic | `versions/*.py` | Parse `op.create_table()`, `op.add_column()`, `sa.Column()` |
+| Knex | `migrations/*.js` or `*.ts` | Parse `table.string('name')`, `table.integer('id').notNullable()` |
+| Prisma | `schema.prisma` | Parse model definitions with field types and `@` attributes |
+| TypeORM | `*migration*.ts` or entity decorators | Parse `@Entity`, `@Column`, `@PrimaryGeneratedColumn` |
+| Django | `migrations/*.py` | Parse `migrations.AddField`, `models.CharField` |
+
+**For each table, extract:** table name, column name, column type, nullable (YES/NO), default value.
+
+**For each model/entity class in the codebase:**
+
+1. **Find the table mapping:**
+   - JPA: `@Table(name = "users")`, `@Entity` (defaults to class name)
+   - SQLAlchemy: `__tablename__ = "users"`
+   - ActiveRecord: class name pluralized
+   - Prisma: `@@map("users")` or model name
+   - Go: struct tags `db:"users"` or GORM `TableName()`
+   - Knex/raw SQL: query strings referencing table names
+
+2. **Column name alignment:** For each model field, determine the mapped column name:
+   - JPA `@Column(name = "first_name")` → maps to `first_name`
+   - SQLAlchemy `Column("first_name")` → maps to `first_name`
+   - GORM struct tag `gorm:"column:first_name"`
+   - Default: ORM naming strategy (e.g., Hibernate's `ImplicitNamingStrategy`)
+
+   | Check | Condition | Severity |
+   |-------|-----------|----------|
+   | Column in query but not in model | SQL references `t.first_name` but model has no corresponding field | HIGH |
+   | Model field with no column | Model field has `@Column` but column doesn't exist in migration DDL | HIGH |
+   | Name mismatch | Query uses `user_name` but model/mapper maps to `username` | CRITICAL |
+
+3. **NOT NULL constraint verification:** For each column with `NOT NULL` (and no `DEFAULT`):
+   - Find all INSERT code paths for that table (repository/DAO methods, raw INSERT queries)
+   - For each INSERT, verify the NOT NULL column is included in the field list and receives a value
+   - Handle builder patterns: `User.builder().name(n).build()` — check if the NOT NULL field is set
+
+   | Check | Condition | Severity |
+   |-------|-----------|----------|
+   | NOT NULL field omitted from INSERT | INSERT code path does not set a NOT NULL column | CRITICAL |
+   | NOT NULL field set to explicit null | Code sets `user.setName(null)` for a NOT NULL column | HIGH |
+
+4. **Type compatibility:** Flag bindings where the language type clearly cannot map to the DB column type:
+
+   | Check | Condition | Severity |
+   |-------|-----------|----------|
+   | Complex object → non-JSONB column | Java `Map<>` or `List<>` bound to a `VARCHAR` column (needs JSONB or a type handler) | HIGH |
+   | String → numeric column | `String` field mapped to `INTEGER`/`BIGINT` column without converter | MEDIUM |
+   | Temporal mismatch | `String` field mapped to `TIMESTAMP` column (should use a date/time type) | MEDIUM |
 
 ### Step 5: Optional Runtime Verification (`--live`)
 
@@ -210,25 +421,42 @@ Capture which API calls the frontend actually makes on page load and compare aga
 
 **Print summary to terminal:**
 ```
-API Contract: 72/100 — FAIL (2 CRITICAL, 4 HIGH, 3 MEDIUM, 1 LOW)
+API Contract: 58/100 — FAIL (4 CRITICAL, 6 HIGH, 3 MEDIUM, 2 LOW)
 
 Backend: 24 routes extracted (Dropwizard)
 Frontend: 31 API calls extracted (axios)
 Matched: 22/31 frontend calls have backend routes
 
-CRITICAL:
-  POST /api/v1/wallets/create → no backend route (orphan)
-    frontend: src/services/walletService.ts:45
-  GET /api/admin/users → backend expects /api/v1/admin/users (path mismatch)
-    frontend: src/pages/AdminUsers.tsx:22
-    backend: AdminResource.java:34 (via nginx: /api/admin/ → /app/admin/)
+Route Findings:
+  [CRIT] POST /api/v1/wallets/create → no backend route (orphan)
+         frontend: src/services/walletService.ts:45
+  [CRIT] GET /api/admin/users → backend expects /api/v1/admin/users (path mismatch)
+         frontend: src/pages/AdminUsers.tsx:22
+         backend: AdminResource.java:34 (via nginx: /api/admin/ → /app/admin/)
 
-HIGH:
-  PUT /api/v1/credentials → field 'secretKey' not in backend DTO
-    frontend sends: {name, host, secretKey, certificate}
-    backend expects: {name, host, secret_key, certificate}
-    src/services/credentialService.ts:67 ↔ CredentialUpdateDto.java:12
-  ...
+Field Shape Audit:
+  [CRIT] GET /api/v1/domains
+         Backend returns: { name: string, registrar_id: string, ... }
+         Frontend reads:  d.domain → MISSING in response
+         Fix: frontend should read d.name (or backend should add @JsonProperty("domain"))
+
+  [CRIT] Inter-service: user-service → billing-service
+         Server sends:  { owner_id: string }  (from @JsonProperty)
+         Client expects: { ownerId: string }  (from @JsonProperty)
+         MISMATCH: owner_id ≠ ownerId — will deserialize as null
+
+  [CRIT] INSERT INTO domains (DomainRepository.java:78)
+         Column status: NOT NULL constraint
+         Code path DomainService.create() does NOT set this field
+
+  [HIGH] PUT /api/v1/credentials
+         Backend returns: { created_at: string }
+         Frontend reads:  createdAt
+         No global response transformer detected — casing mismatch
+
+  [HIGH] Model DomainEntity → table domains
+         Query references d.registrar but column is registrar_id
+         DomainMapper.java:23
 
 Full report: .cc-master/api-contracts/20260307-152300-contract-report.json
 ```
@@ -249,11 +477,17 @@ Only execute this step if `--fix` was provided. If not, skip to chain point.
 - **HTTP method correction:** Change `.get()` to `.post()` (or vice versa) when the path matches but the method does not. Only fix if there is exactly one backend route at that path.
 - **Field name casing:** When a frontend request field differs from the backend DTO field only by casing convention (camelCase ↔ snake_case), rename the frontend field. Only fix if there is exactly one candidate match.
 
+**Safe auto-fixes for field shape findings:**
+- **Frontend casing correction:** When frontend reads `createdAt` but backend sends `created_at` and no global transformer exists — add the field to a normalizer or rename the access. Only fix if there is exactly one candidate match.
+- **Missing `@JsonProperty` annotation:** When an inter-service DTO field name doesn't match the wire name, add the correct annotation to the client DTO. Only fix if there is exactly one candidate match.
+
 **Do NOT auto-fix:**
 - Shape mismatches where the right answer is ambiguous (multiple candidate fields).
 - Auth mechanism differences (requires architectural decision).
 - Missing backend routes (requires backend work).
-- Response field mismatches (frontend may need to stop using a removed field, or backend may need to start returning it — ambiguous).
+- Response field mismatches where the frontend reads a completely different name (e.g., `domain` vs `name`) — requires product decision on which side to change.
+- NOT NULL violations (requires understanding the data model — create a task instead).
+- Database schema mismatches (column type changes need migration planning).
 - Any fix that would modify more than 5 files (too broad — create a task instead).
 
 After applying fixes, re-run Steps 4-6 to recalculate the score and update the report. Print before/after scores.
@@ -280,3 +514,9 @@ This is a standalone skill — no auto-chain propagation. No `--auto` flag.
 - Do NOT make mutating HTTP requests (POST/PUT/DELETE with bodies) during `--live` runtime verification — only GET, HEAD, and OPTIONS.
 - Do NOT auto-fix when the correct fix is ambiguous — create a kanban task instead.
 - Do NOT assume frontend and backend share the same origin — always check for proxy layers.
+- Do NOT flag casing mismatches as CRITICAL if a global response transformer (camelcaseKeys, humps, etc.) is detected — downgrade to LOW.
+- Do NOT recurse into nested response types deeper than 3 levels — diminishing returns and risk of circular references.
+- Do NOT assume a single naming strategy per project — different endpoints may use different DTOs with different annotations.
+- Do NOT flag inter-service DTO mismatches for projects that are clearly single-service — skip Step 4e silently.
+- Do NOT flag NOT NULL violations when the column has a DEFAULT value in the migration — the DB handles it.
+- Do NOT parse migration files outside the project root — only read files within the repository.

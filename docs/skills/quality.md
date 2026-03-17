@@ -185,7 +185,7 @@ Four layers inspected:
 
 ## `/cc-master:api-contract`
 
-Frontend/backend API contract verification derived from actual source code — no OpenAPI spec required. Cross-references every frontend call against every backend route through proxy layers.
+Frontend/backend API contract verification with full data shape tracing. Verifies routes + proxy layers, then traces field shapes across all layers: database schema → backend model/serialization → HTTP response → frontend field access. Catches the silent bugs that route-level checks miss.
 
 ```
 Usage:  /cc-master:api-contract [--scope frontend|backend|both] [--fix] [--live <url>] [--output <dir>]
@@ -195,12 +195,21 @@ Output: .cc-master/api-contracts/<timestamp>-contract-report.json
 | Flag | Effect |
 |------|--------|
 | `--scope` | Limit analysis to one side (default: both) |
-| `--fix` | Auto-fix simple mismatches (path corrections, method corrections, field name casing) |
+| `--fix` | Auto-fix simple mismatches (path corrections, method corrections, field name casing, missing annotations) |
 | `--live <url>` | Runtime verification via curl/agent-browser |
 
 Pass threshold: score ≥ 70 AND zero CRITICAL findings.
 
-Supports: Dropwizard/Jersey, Vert.x, Express/Node, Spring Boot, FastAPI, Flask, Go. Traces through nginx proxy layers.
+**Verification layers:**
+
+| Layer | What it checks |
+|-------|----------------|
+| Route matching | Frontend URLs ↔ backend routes through proxy layers |
+| Response shape | Backend serialized field names ↔ frontend field access (accounting for `@JsonProperty`, naming strategies, global transformers) |
+| Inter-service DTOs | Server-side response DTO wire names ↔ client-side request DTO wire names |
+| DB → Model | Migration column names/types/constraints ↔ ORM model fields ↔ INSERT code paths |
+
+Supports: Dropwizard/Jersey, Vert.x, Express/Node, Spring Boot, FastAPI, Flask, Go, Django, Rails. Traces through nginx proxy layers. Parses migrations from SQL, Liquibase, Flyway, Alembic, Knex, Prisma, TypeORM, Django.
 
 ---
 

@@ -340,7 +340,7 @@ Usage:  /cc-master:gap-check <task-id> | --all | --roadmap
 Output: .cc-master/gap-check-<timestamp>.json
 ```
 
-**`/cc-master:api-contract`** — Frontend/backend contract verification from source code. No OpenAPI spec required. Traces through proxy layers. Optional auto-fix and live runtime verification.
+**`/cc-master:api-contract`** — Frontend/backend contract verification with full data shape tracing. Verifies routes + proxy layers, then traces field shapes: DB schema → backend serialization → HTTP response → frontend field access. Catches silent null bugs from naming mismatches, NOT NULL violations, and inter-service DTO drift.
 
 ```
 Usage:  /cc-master:api-contract [--scope frontend|backend|both] [--fix] [--live <url>]
