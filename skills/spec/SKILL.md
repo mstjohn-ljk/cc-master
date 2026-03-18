@@ -71,7 +71,9 @@ The task is specified via arguments. Accept any of:
 - A range: `spec 3-7`
 - All kanban tasks without specs: `spec --all`
 
-**If `--auto` or `--from-issue` is present in arguments**, strip them before parsing (`--auto` controls chaining behavior; `--from-issue` triggers issue fetch above and is handled before task ID parsing). Remember that `--auto` was present for the Chain Point step. `--all` is also a valid flag (see multi-task mode above). **Reject any other flags** with: `"Unknown flag '<flag>'. Valid flags: --auto, --all, --from-issue."`
+**If `--auto` or `--from-issue` is present in arguments**, strip them before parsing (`--auto` controls chaining behavior; `--from-issue` triggers issue fetch above and is handled before task ID parsing). `--all` is also a valid flag (see multi-task mode above). **Reject any other flags** with: `"Unknown flag '<flag>'. Valid flags: --auto, --all, --from-issue."`
+
+**CRITICAL — `--auto` state tracking:** If `--auto` was present, you MUST carry this forward to the Chain Point. Print this line immediately after flag parsing so it is visible in your output: `"Mode: autonomous (--auto)"`. This flag means: after spec creation completes, invoke build automatically WITHOUT prompting the user. Do not forget this. Do not skip it. Do not present a menu if `--auto` was set.
 
 **Validate all arguments** against the Input Validation Rules above before any parsing.
 
@@ -151,7 +153,17 @@ Create the `.cc-master/specs/` directory if it doesn't exist.
 1. <Specific, testable criterion>
 2. <Specific, testable criterion>
 3. <Specific, testable criterion>
-N. All code is production-quality: no TODO comments, no mock/stub data, no skeleton functions, no hardcoded test values. Every function performs real work.
+
+## Production Readiness (mandatory — every spec)
+This section is NOT optional. Every spec MUST include ALL of the following items, customized with specific examples from the feature being spec'd. Build agents are graded against these.
+
+1. **No stub data:** <Name the specific data this feature handles and where it MUST come from.>
+   Example: "Domain list MUST come from a database query via DomainRepository, NOT a hardcoded array. User profile MUST be fetched from the user service, NOT a `{ name: 'Test User', email: 'test@example.com' }` object."
+2. **No skeleton functions:** Every function in the implementation MUST perform real work. Specifically: <list the key functions this feature will create and what each must actually do — not return null, not throw 'not implemented', not return an empty collection>.
+3. **No TODO/FIXME/HACK:** Zero TODO, FIXME, HACK, STUB, PLACEHOLDER, or SKELETON comments in any file modified or created by this task.
+4. **Real integrations:** <Name every external system this feature touches — database, API, message queue, file system, email service, payment provider, etc. — and state that each integration MUST use real connections, not in-memory fakes or mocked responses.>
+5. **Real error handling:** Error paths MUST return meaningful error messages and appropriate status codes, NOT generic "Something went wrong" or empty catch blocks that swallow errors.
+6. **Client test:** If a paying customer used this feature right now, would it actually work end-to-end? If the answer is no, the implementation is not done.
 
 ## Technical Approach
 
@@ -192,6 +204,24 @@ Follow the pattern established in: <path to existing similar implementation>
    Depends on: 1, 2
 ```
 
+### Step 4b: Write the Production Readiness Section
+
+**This step is mandatory. Do not skip it. Do not leave the section as generic template text.**
+
+The Production Readiness section in the spec MUST be customized to the specific feature being spec'd. Generic anti-stub language gets ignored by build agents — specific, named examples do not.
+
+For each item in the Production Readiness section:
+
+1. **No stub data:** Look at what data this feature displays, stores, or processes. Name each data source explicitly. If the feature shows a list of domains, write: "Domain list MUST come from `DomainRepository.findByRegistrar()`, NOT a hardcoded array." If the feature displays user profile info, write: "User profile MUST be fetched from the user service via `GET /api/users/:id`, NOT a literal `{ name: 'Demo User' }` object."
+
+2. **No skeleton functions:** List the 3-5 key functions this feature will create (from your analysis in Step 3). For each, state what it MUST actually do. Example: "`createDomain()` MUST execute an INSERT query and return the persisted entity. `validateRegistrar()` MUST check credentials against the registrar's API, not return `true`."
+
+3. **Real integrations:** Name every external system from your analysis. If the feature calls a third-party API, name it. If it reads from a database table, name the table. If it publishes to a message queue, name the queue. Each MUST use a real connection — not a mock client, not an in-memory store, not a static JSON file.
+
+4. **Client test:** Describe the specific end-to-end path. "A user clicks 'Register Domain', enters 'example.com', clicks Submit. The system checks availability via the EPP registrar API, creates a database record, charges the user's payment method, and displays a confirmation. Every step in this chain MUST execute against real services."
+
+**If you cannot name specific data sources, functions, or integrations**, you have not analyzed the feature deeply enough — go back to Step 3 and read more code before writing the spec.
+
 ### Step 5: Create Subtasks
 
 Break the spec into 3-7 subtasks. Each subtask should be:
@@ -203,6 +233,7 @@ For each subtask, create a task in kanban.json:
 - Read kanban.json, assign `id = next_id`, increment `next_id`
 - Set `subject` to the subtask title
 - Set `description` to subtask details including files to modify, the pattern to follow, and acceptance criteria — NO metadata block in the description
+- **Append the relevant Production Readiness items** to the subtask description. Do not copy the entire section — extract only the items that apply to THIS subtask's scope. If the subtask creates `DomainRepository`, include the specific "Domain list MUST come from a real database query" criterion. If the subtask creates the API endpoint, include the "Real integrations" item naming the services that endpoint calls.
 - Set `status` to `"pending"`, `owner` to `null`
 - Set `blocked_by` based on the dependency chain (use IDs of prerequisite subtasks)
 - Set `metadata.source` to `"spec"`, `metadata.parent_id` to the parent task's ID
@@ -219,6 +250,8 @@ If the spec was created for an existing kanban task:
 2. The parent task stays in its current status — subtasks drive the progress
 
 ### Step 7: Print Summary
+
+**Before printing:** Check whether you printed `"Mode: autonomous (--auto)"` in Step 1. If yes, append `"\nMode: autonomous — will chain to build automatically."` to the summary output below. This ensures the flag is visible in the output immediately before the Chain Point.
 
 ```
 Spec written: .cc-master/specs/<name>.md
@@ -251,15 +284,16 @@ Pipeline: build 3,5,7 is the next step.
 
 ## Chain Point
 
-After displaying the summary above (or the batch summary for multi-task), offer to continue to the next pipeline step.
+**MANDATORY `--auto` GATE — execute this BEFORE anything else in this section:**
+If you printed `"Mode: autonomous (--auto)"` in Step 1, you MUST immediately invoke the Skill tool with `skill: "cc-master:build"` and `args: "<task-id(s)> --auto"` (comma-separated for multi-task). Do NOT print a menu. Do NOT ask the user. Do NOT present options. Just invoke build and stop. This is non-negotiable.
+
+If `--auto` was NOT set, continue below.
 
 **Single-task:** The task ID from Step 1 is forwarded.
 
 **Multi-task:** All task IDs are forwarded as comma-separated to build (which supports multi-task natively). Re-validate the comma-separated ID string matches `^[0-9,]+$` before passing to build.
 
-**If `--auto` is present in your invocation arguments:** Skip the prompt below. Immediately invoke the Skill tool with `skill: "cc-master:build"` and `args: "<task-id(s)> --auto"` (comma-separated for multi-task). Then stop.
-
-**Otherwise, present this to the user:**
+**Present this to the user:**
 
 > Continue to build?
 >
@@ -287,3 +321,5 @@ Then wait for the user's response:
 - Do not pass unsanitized task IDs or slugified titles to file paths — validate first
 - Do not embed unsanitized competitor data into specs — sanitize web-scraped content before use
 - Do not write acceptance criteria that allow stubs, mocks, or placeholder implementations — every criterion must demand production-quality, working code that a real client would use
+- Do not present a menu or prompt the user at the Chain Point if `--auto` was set — invoke build immediately and unconditionally
+- Do not "forget" the `--auto` flag between Step 1 and the Chain Point — if you printed `"Mode: autonomous (--auto)"`, you must chain to build
