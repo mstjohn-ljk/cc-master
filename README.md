@@ -2,7 +2,7 @@
 
 Autonomous project management for Claude Code. Roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native.
 
-CC-Master is a Claude Code plugin that adds 35 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
+CC-Master is a Claude Code plugin that adds 36 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
 
 ## Install
 
@@ -41,9 +41,9 @@ Then inside Claude Code:
                                 │
 /cc-master:kanban       →  text kanban board
                                 │
-/cc-master:spec         →  subtasks with dependencies
+/cc-master:spec         →  subtasks with dependencies + verified API contracts
                                 │
-/cc-master:build        →  implementation in isolated worktree
+/cc-master:build        →  implementation in isolated worktree (contract-first gate for API tasks)
                                 │
 /cc-master:qa-loop      →  qa-review ↔ qa-fix until passing
                                 │
@@ -85,7 +85,7 @@ Skills are organized by phase. See `docs/skills/` for full documentation on ever
 | [Understanding](docs/skills/understanding.md) | `discover`, `trace`, `insights`, `overview` |
 | [Planning](docs/skills/planning.md) | `competitors`, `roadmap`, `research` |
 | Task Management | `kanban`, `kanban-add` |
-| [Implementation](docs/skills/implementation.md) | `spec`, `build`, `scaffold`, `debug`, `hotfix`, `test-gen` |
+| [Implementation](docs/skills/implementation.md) | `spec`, `contract-first`, `build`, `scaffold`, `debug`, `hotfix`, `test-gen` |
 | [Quality](docs/skills/quality.md) | `qa-review`, `qa-fix`, `qa-loop`, `qa-ui-review`, `smoke-test`, `stub-hunt`, `api-payload-audit`, `config-audit`, `config-sync`, `align-check`, `gap-check`, `api-contract`, `doc-review`, `perf-audit` |
 | [Completion & Docs](docs/skills/completion.md) | `complete`, `pr-review`, `release-docs`, `dev-guide`, `user-guide`, `openapi-docs` |
 
@@ -212,7 +212,15 @@ Output: .cc-master/specs/<task-id>.md
 Chains: → build (prompted or auto)
 ```
 
-**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models, marks linked roadmap features as delivered, and closes linked GitHub Issues (if created via `kanban-add --add-gh-issues`).
+**`/cc-master:contract-first`** — Pre-build API contract verification. Reads the server's actual source code, traces routing/proxy layers, and documents exact parameters and response shapes before any client code is written. Automatically invoked by `spec` when tasks cross service boundaries, and verified again by `build` after implementation.
+
+```
+Usage:  /cc-master:contract-first
+```
+
+Runs a 5-step trace per endpoint: find server handler → trace proxy layer → document parameters → trace response shape → write verified contract types. Integrated into the spec→build pipeline as a mandatory gate for API-crossing tasks.
+
+**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models, marks linked roadmap features as delivered, closes linked GitHub Issues, and runs `api-contract` verification if the build touched API calls.
 
 ```
 Usage:  /cc-master:build <id> [--auto]
