@@ -403,6 +403,27 @@ Artifacts updated:
 
 If nothing was updated (no discovery.json, no roadmap feature link, no GitHub Issues), print nothing — skip silently.
 
+### Step 7c: API Contract Verification (if build involved API calls)
+
+**Only execute this step if verification PASSED in Step 6 AND the build created or modified client-side code that makes HTTP calls.**
+
+Detection: Check if any files modified by the build are in `api/`, `services/`, or contain `apiClient`, `axios`, `fetch(`, `httpClient`, `requests.get`, `http.Get` patterns.
+
+If API calls were touched:
+
+1. Invoke the Skill tool with `skill: "cc-master:api-contract"` and `args: ""` (empty — runs full verification).
+2. Read the contract report output.
+3. If the contract score is below 70 or has CRITICAL findings:
+   - Print: `"API contract verification FAILED (score: N). CRITICAL findings must be fixed before QA."`
+   - List each CRITICAL finding with file:line references
+   - In `--auto` mode: attempt auto-fix by invoking `cc-master:api-contract --fix`, then re-verify. If still failing after fix, escalate (print failures, do NOT chain to qa-loop).
+   - In manual mode: present findings and suggest running `cc-master:api-contract --fix`
+4. If the contract passes (score >= 70, zero CRITICALs):
+   - Print: `"API contract verification PASSED (score: N)."`
+   - Continue to Step 8
+
+This prevents the exact class of bugs where build agents write code with wrong API paths, parameter names, or response shapes that compile fine but fail at runtime.
+
 ### Step 8: Chain Point / Autonomous Pipeline
 
 **Single-task mode — Chain Point (unchanged):**
@@ -546,7 +567,23 @@ After reading, explicitly answer these questions:
 - Repeat the readiness check until all answers are yes
 - Do NOT proceed to implementation with unresolved uncertainty — a wrong implementation is worse than a slow one
 
-**Only when all five questions are answered yes do you proceed to Phase 3.**
+**Only when all five questions are answered yes do you proceed to Phase 2b.**
+
+### Phase 2b: Contract Verification (if task involves API calls)
+
+If this subtask writes ANY client code that makes HTTP calls to a server endpoint:
+
+1. Check if the spec includes a `### Verified API Contracts` section for each endpoint you will call
+2. If contracts exist in the spec: import the verified types — do NOT define ad-hoc inline interfaces
+3. If contracts are MISSING from the spec: you MUST run the contract-first 5-step trace yourself BEFORE writing any client code:
+   - Find the server handler (read the actual source file with `@Path`, `router.get()`, etc.)
+   - Trace through the routing/proxy layer (nginx location blocks, context paths)
+   - Document parameters (read `@QueryParam`/`@RequestParam` annotations with exact names, types, defaults, constraints)
+   - Trace the response shape (return type → serializer behavior → exact wire JSON field names)
+   - Write the contract as a typed interface with a comment referencing the backend source file and line number
+4. Do NOT guess API paths, parameter names, response shapes, or field casing. Do NOT copy from other client code without verifying against the server source. Do NOT use `unknown` or `any` for response types.
+
+**If you cannot verify an endpoint exists or its contract doesn't match what the subtask expects, STOP and report the discrepancy instead of writing broken code.**
 
 ### Phase 3: Implement
 

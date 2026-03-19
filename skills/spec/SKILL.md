@@ -124,7 +124,19 @@ Based on the task requirement and your project understanding:
    - If adding a new service, read an existing service
    - Document the pattern: "Follow the pattern in src/routes/users.ts"
 
-3. **Identify risks and unknowns:**
+3. **Identify API contracts (MANDATORY if task crosses a service boundary):**
+   If the task involves ANY client-side code calling a server endpoint (frontend→backend, service→service, CLI→API), you MUST run the `contract-first` 5-step trace for EVERY endpoint:
+   - Step 1: Find the server handler (read actual source — `@Path`, `router.get()`, etc.)
+   - Step 2: Trace the routing/proxy layer (nginx/Caddy/ALB path rewriting)
+   - Step 3: Document parameters (read `@QueryParam`/`@RequestParam` annotations with defaults and validation)
+   - Step 4: Trace the response shape (return type → serialization → wire JSON field names)
+   - Step 5: Write verified contract types (TypeScript interface / Python dataclass / Go struct with backend source file:line reference)
+
+   Include the verified contracts in the spec under `### Verified API Contracts`. If an endpoint doesn't exist or parameters don't match what the task assumes — flag it NOW in the spec's Risks section. Do NOT defer contract verification to build time.
+
+   **Reference:** See `cc-master:contract-first` skill for the full 5-step trace methodology and red flags.
+
+4. **Identify risks and unknowns:**
    - Are there dependencies that need to be installed?
    - Are there database migrations needed?
    - Could this break existing functionality?
@@ -177,6 +189,18 @@ Follow the pattern established in: <path to existing similar implementation>
 ### Files to Create
 - `<path>` — <purpose>
 - `<path>` — <purpose>
+
+### Verified API Contracts (if task crosses service boundary)
+For each endpoint this feature calls, include the verified contract from the contract-first trace:
+```
+ENDPOINT: <METHOD> <frontend path>
+BACKEND: <SourceFile.java>:<line> (or .py, .go, .ts, etc.)
+NGINX: <location block> → <proxy_pass target>
+PARAMS: <name: type (constraints)>
+RESPONSE: <TypeScript interface / Python dataclass / Go struct with exact wire field names>
+VERIFIED: <date>
+```
+If NO API calls are involved, omit this section entirely.
 
 ### Dependencies
 - <any new packages/dependencies needed>
@@ -323,3 +347,4 @@ Then wait for the user's response:
 - Do not write acceptance criteria that allow stubs, mocks, or placeholder implementations — every criterion must demand production-quality, working code that a real client would use
 - Do not present a menu or prompt the user at the Chain Point if `--auto` was set — invoke build immediately and unconditionally
 - Do not "forget" the `--auto` flag between Step 1 and the Chain Point — if you printed `"Mode: autonomous (--auto)"`, you must chain to build
+- Do not write specs that list API endpoints without running the contract-first 5-step trace — every endpoint in a spec MUST be verified against the server's actual source code, not guessed from documentation, existing client code, or memory. If you cannot verify an endpoint, flag it as a risk in the spec.
