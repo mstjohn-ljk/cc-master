@@ -20,6 +20,31 @@ Chains: → build (prompted or --auto)
 
 ---
 
+## `/cc-master:contract-first`
+
+Pre-build API contract verification. Reads the server's actual source code, traces routing/proxy layers, and documents exact parameters and response shapes before any client code is written. Prevents the #1 cause of integration bugs: guessing the API shape instead of reading the server source.
+
+```
+Usage:  /cc-master:contract-first
+```
+
+**5-step trace per endpoint:**
+
+| Step | Action |
+|------|--------|
+| 1 | Find the server handler (`@Path`, `router.get()`, `@app.route()`, etc.) |
+| 2 | Trace the routing/proxy layer (nginx rewrites, context paths, sub-router mounts) |
+| 3 | Document parameters (`@QueryParam`, `@RequestParam` — exact names, types, defaults, constraints) |
+| 4 | Trace the response shape (return type → serializer behavior → exact wire JSON field names) |
+| 5 | Write verified contract types (TypeScript interface / Python dataclass / Go struct with backend source file:line reference) |
+
+**Pipeline integration:**
+- `spec` runs the 5-step trace when tasks cross service boundaries and embeds verified contracts in the spec
+- `build` agents import verified contract types instead of guessing
+- `build` Step 7c re-runs `api-contract` after implementation to catch any drift
+
+---
+
 ## `/cc-master:build`
 
 Implements in an isolated git worktree. Groups subtasks into dependency waves and dispatches parallel agents for independent work. Enforces production quality — no TODOs, no stubs, no mock data.
@@ -30,6 +55,7 @@ On successful build, automatically:
 - **Updates `discovery.json`** with new routes, services, middleware, models, and integrations added by the build
 - **Marks linked roadmap features as delivered** when the task has a `feature_id` in its metadata
 - **Closes linked GitHub Issues** with a completion comment (if created via `kanban-add --add-gh-issues`)
+- **Runs `api-contract` verification** if the build touched client code that makes HTTP calls (Step 7c)
 
 ```
 Usage:  /cc-master:build <id> [--auto]
