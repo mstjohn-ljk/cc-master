@@ -1,17 +1,20 @@
 ---
 name: api-contract
-description: Frontend/backend API contract verification with full data shape tracing. Derives the contract from source code, cross-references routes and proxy layers, then traces field shapes across all layers — database schema → backend serialization → HTTP response → frontend field access. Catches silent null bugs from naming mismatches, NOT NULL violations, and inter-service DTO drift. No OpenAPI spec required. Standalone.
+description: Frontend/backend API contract verification with full data shape tracing. Derives the contract from source code, cross-references routes and proxy layers, then traces field shapes across all layers — database schema → backend serialization → HTTP response → normalizer/mapping layer → frontend field access. Catches silent null bugs from naming mismatches, normalizer gaps, derived field ordering bugs, hardcoded fallbacks masking mismatches, NOT NULL violations, and inter-service DTO drift. No OpenAPI spec required. Standalone.
 ---
 
 # cc-master:api-contract — Frontend/Backend Contract Verification
 
-Derive the API contract from actual source code on both sides — no OpenAPI spec required (uses one as supplemental input if it exists). Cross-reference every frontend API call against every backend route, tracing through proxy layers (nginx rewrites, applicationContextPath, sub-router mounts) to verify the full externally-visible path. Then trace field shapes across all layers — database schema → backend model/serialization → HTTP response → frontend field access — to catch the silent bugs that route-level checks miss.
+Derive the API contract from actual source code on both sides — no OpenAPI spec required (uses one as supplemental input if it exists). Cross-reference every frontend API call against every backend route, tracing through proxy layers (nginx rewrites, applicationContextPath, sub-router mounts) to verify the full externally-visible path. Then trace field shapes across all layers — database schema → backend model/serialization → HTTP response → **normalizer/mapping layer** → frontend field access — to catch the silent bugs that route-level checks miss. The normalizer layer (functions that rename or reshape fields between the raw API response and page components) is a critical intermediate where field mismatches hide — a spread passes backend names through unchanged, but if the page reads a different casing and the normalizer doesn't bridge it, the field is silently undefined.
 
 This is different from OpenAPI-based validators that trust the spec. This skill trusts the source code and treats the spec as a secondary input that may itself be stale.
 
 **What it catches that route-level tools don't:**
 - Backend serializes `name` but frontend reads `domain` → undefined at runtime
 - Backend sends `created_at` (snake_case) but frontend reads `createdAt` → null without a transformer
+- Normalizer maps `title` and `created` but forgets `is_active` ↔ `isActive` → page reads undefined
+- Normalizer derived field references sibling property in same object literal → always undefined in JS
+- Hardcoded fallback `res?.auth_code || 'DEMO-12345'` masks a field name mismatch → user sees fake data
 - Service A sends `owner_id` but Service B's client DTO expects `ownerId` → silent null
 - INSERT omits a NOT NULL column → constraint violation at runtime
 - Query references column `registrar` but model maps to `registrar_id` → wrong data
@@ -164,26 +167,30 @@ This step runs as coordinator (not dispatched to an agent).
 | OpenAPI/source disagreement | OpenAPI spec path/method/fields differ from source code | MEDIUM |
 | Pagination format mismatch | Frontend sends offset/limit but backend expects cursor, or vice versa | MEDIUM |
 
-**Field shape findings** (from Steps 4b–4f) are added to the same scoring:
+**Field shape findings** (from Steps 4b–4g) are added to the same scoring:
 
 | Check | Source Step | Severity |
 |-------|------------|----------|
 | Frontend reads field missing from response shape | 4d | CRITICAL |
-| Inter-service wire name mismatch | 4e | CRITICAL |
-| Inter-service missing field | 4e | CRITICAL |
-| NOT NULL column omitted from INSERT | 4f | CRITICAL |
-| DB column name ≠ model/query field name | 4f | CRITICAL |
+| Normalizer gap — page reads field not in normalizer output or backend response | 4d | CRITICAL |
+| Normalizer derived field references sibling property in same object literal | 4d | CRITICAL |
+| Inter-service wire name mismatch | 4f | CRITICAL |
+| Inter-service missing field | 4f | CRITICAL |
+| NOT NULL column omitted from INSERT | 4g | CRITICAL |
+| DB column name ≠ model/query field name | 4g | CRITICAL |
+| Hardcoded fallback masking field mismatch — no attempted field exists in response | 4e | HIGH |
+| No-spread normalizer drops backend field — field exists in response but not in normalizer output | 4d | HIGH |
 | Response field casing mismatch (no global transformer) | 4d | HIGH |
 | Nested path mismatch | 4d | HIGH |
-| NOT NULL field set to explicit null | 4f | HIGH |
-| Complex object → non-JSONB column | 4f | HIGH |
-| Model field in query but column missing from migrations | 4f | HIGH |
-| Inter-service type mismatch | 4e | HIGH |
+| NOT NULL field set to explicit null | 4g | HIGH |
+| Complex object → non-JSONB column | 4g | HIGH |
+| Model field in query but column missing from migrations | 4g | HIGH |
+| Inter-service type mismatch | 4f | HIGH |
 | Response type shape mismatch (object vs string) | 4d | HIGH |
-| Fallback chain in frontend (indicates naming instability) | 4d | MEDIUM |
-| String ↔ numeric/temporal column type mismatch | 4f | MEDIUM |
+| Fallback chain — at least one attempted field valid in response | 4e | MEDIUM |
+| String ↔ numeric/temporal column type mismatch | 4g | MEDIUM |
 | Frontend ignores response fields | 4d | LOW |
-| Inter-service extra server fields | 4e | LOW |
+| Inter-service extra server fields | 4f | LOW |
 
 **Scoring:** Start at 100. CRITICAL: -20. HIGH: -10. MEDIUM: -5. LOW: -2. Floor at 0.
 
@@ -255,6 +262,19 @@ For each frontend API call identified in Step 3, determine what field names the 
 6. **Assignment to state:** `setUser(response.data)` — trace into all subsequent accesses of `user` state
 7. **Normalizer/transform functions:** `const normalized = { domain: r.domain || r.domain_name || r.name }` — records that the frontend tries `domain`, then `domain_name`, then `name` as fallbacks
 
+**Normalizer detection — CRITICAL:** When tracing from raw HTTP response to what page components consume, detect **any intermediate transformation** between the API call and the return value:
+
+1. **Inline mapping:** `.map(item => ({ ...item, title: item.name, created: item.created_at }))` — the mapping function renames or reshapes fields before returning.
+2. **Wrapper functions:** A service method that calls the API then transforms the result before returning: `const data = await api.get('/items'); return data.map(normalize);` — trace into `normalize`.
+3. **Utility normalizers:** Imported transform functions applied to responses: `import { normalizeItem } from './normalizers'; return items.map(normalizeItem);` — read the normalizer file.
+4. **Object literal transforms with spread:** `{ ...item, newField: item.x || item.y }` — the spread passes through raw fields, explicit assignments add/override. Both contribute to the normalizer output shape.
+
+For each normalizer found, record:
+- **Explicitly mapped fields:** Left-hand-side property names in the mapping object literal (these are guaranteed in the normalizer output).
+- **Pass-through fields:** If the normalizer uses `...item` spread, all raw backend response fields pass through UNLESS overridden by an explicit mapping.
+- **Derived fields:** Fields computed from other fields (e.g., `label: item.type === 'x' ? 'A' : 'B'`).
+- **Source file and line range** of the normalizer function.
+
 **Response unwrapping patterns to account for:**
 - `response.data` (axios)
 - `response.json()` (fetch)
@@ -268,31 +288,127 @@ For each frontend API call identified in Step 3, determine what field names the 
   "fieldsAccessed": ["id", "email", "displayName", "profile.avatarUrl", "createdAt"],
   "fallbackChains": [{"target": "domain", "tried": ["domain", "domain_name", "name"]}],
   "unwrapPattern": "response.data",
-  "sourceFile": "UserList.tsx:34"
+  "sourceFile": "UserList.tsx:34",
+  "normalizer": {
+    "present": true,
+    "sourceFile": "api.js:88-95",
+    "explicitlyMapped": ["title", "created", "direction"],
+    "passThrough": true,
+    "derivedFields": [{"name": "label", "inputFields": ["direction"]}]
+  }
 }
 ```
 
-### Step 4d: Cross-Reference Response Shapes
+### Step 4d: Cross-Reference Response Shapes (Three-Layer)
 
-For each matched endpoint pair (from Step 4), compare the backend response shape (Step 4b) against the frontend field access (Step 4c):
+For each matched endpoint pair (from the Step 4 route matching algorithm), cross-reference **three layers** — backend response shape (Step 4b), normalizer output (from Step 4c normalizer detection), and page-level field access (Step 4c) — to catch mismatches at any boundary.
+
+**Three-layer verification algorithm:**
+
+For each field accessed at the page level:
+1. **If a normalizer exists for this endpoint:**
+   - Is the field explicitly mapped by the normalizer (appears as a left-hand-side key in the mapping)? → OK
+   - Is the field accessed by the page under the **exact backend wire name** AND the normalizer passes it through via spread (`...item`)? → OK (spread pass-through — the page uses the same name the backend sends)
+   - Does the normalizer have NO spread (`passThrough: false`) AND the field is NOT explicitly mapped? → **HIGH: no-spread normalizer drops this field.** The normalizer is selective and this field is excluded from its output. May be intentional — report as HIGH, not CRITICAL.
+   - Is the field in the backend response under a DIFFERENT name (e.g., casing mismatch), the normalizer does NOT bridge the difference, and the spread (if present) passes the backend name through unchanged? → **CRITICAL: normalizer gap — the spread passes through the backend wire name but the page reads a different name.**
+   - Is the field in NEITHER the normalizer explicit output NOR the backend response (under any name)? → **CRITICAL: field is read but doesn't exist anywhere in the data chain. Always undefined.**
+2. **If no normalizer exists:** Compare page-level field access directly against backend response shape (original two-layer check).
+
+For each backend response field:
+- Does the page access it by its exact backend wire name (directly or via normalizer pass-through)? → OK
+- Does the normalizer map it to a name the page uses? → OK
+- Does the page access it by a DIFFERENT name that the normalizer doesn't bridge? → **CRITICAL: naming mismatch with no bridge.**
+- Is the field not accessed anywhere (page or normalizer)? → LOW (informational)
+
+**Normalizer-specific checks:**
 
 | Check | Condition | Severity |
 |-------|-----------|----------|
-| Frontend reads missing field | Field the frontend accesses does not exist in backend response shape | CRITICAL |
-| Casing mismatch | Backend sends `created_at`, frontend reads `createdAt` (or vice versa) with no global transformer | HIGH |
+| Normalizer gap | Backend sends `isActive`, page reads `is_active`, normalizer maps other fields but NOT this one. The spread passes through `isActive` (the backend key) but the page reads `is_active` (a different key). | CRITICAL |
+| Field not in response or normalizer | Page reads a field name that exists nowhere in the backend response or normalizer output — a completely invented field name. | CRITICAL |
+| Derived field ordering bug | Normalizer computes derived fields in an object literal using sibling properties: `{ ...obj, a: obj.x, b: a === 'y' ? ... }`. In JavaScript, `b` cannot reference `a` because `a` is a property of the object being constructed, not a variable in scope. The value of `a` is always `undefined` in the `b` computation. | CRITICAL |
+
+
+**Hardcoded fallback analysis** is performed in **Step 4e** — do not duplicate here. If Step 4d detects a fallback chain at any point (normalizer analysis or standard field checks), record the field names attempted but defer severity classification and finding creation to Step 4e.
+
+**Standard field shape checks (apply regardless of normalizer presence):**
+
+| Check | Condition | Severity |
+|-------|-----------|----------|
+| Frontend reads missing field | Field the frontend accesses does not exist in backend response shape (and no normalizer bridges it) | CRITICAL |
+| Casing mismatch | Backend sends `created_at`, frontend reads `createdAt` (or vice versa) with no global transformer and no normalizer bridge | HIGH |
 | Nested path mismatch | Frontend reads `profile.avatarUrl` but backend sends `profile.avatar_url` | HIGH |
-| Fallback chain needed | Frontend uses `r.domain \|\| r.domain_name` — indicates known instability in field naming | MEDIUM |
 | Frontend ignores fields | Backend sends fields that frontend never reads | LOW (informational) |
 | Type shape mismatch | Backend sends an object but frontend accesses it as a string (or vice versa) | HIGH |
+
+**Normalizer output format for findings:**
+
+```
+[CRITICAL] NORMALIZER GAP: items.list()
+  Backend sends: isActive (ItemModel.java:42 @JsonProperty("isActive"))
+  Normalizer maps: title, created (api.js:88-90)
+  Normalizer does NOT map: is_active ↔ isActive
+  Page reads: item.is_active (items-page.js:67)
+  Result: always undefined
+  Fix: use item.isActive in page, OR add is_active: item.isActive to normalizer
+
+[CRITICAL] FIELD NOT IN RESPONSE: transfers.list()
+  Backend sends: completedAt (TransferEntity.java:50)
+  Page reads: tr.approval_date (transfers.js:372)
+  approval_date does not exist in backend response or normalizer
+  Result: always undefined
+  Fix: use tr.completedAt in page
+
+[CRITICAL] DERIVED FIELD ORDERING BUG: items.list()
+  Normalizer: { ...item, direction: item.direction || item.type, label: direction === 'inbound' ? 'IN' : 'OUT' }
+  Bug: label references direction as a variable, but direction is a sibling property — undefined in JS
+  Fix: extract into a variable before the object literal, or repeat the expression
+
+[HIGH] HARDCODED FALLBACK MASKING MISMATCH: domains.getAuthCode()
+  Backend sends: authorizationCode (DomainResource.java:876)
+  Page reads: res?.auth_code || res?.code || 'DEMO-12345' (domains.js:187)
+  Neither auth_code nor code exist in response
+  Result: always falls through to hardcoded 'DEMO-12345'
+  Fix: use res?.authorizationCode in page
+```
 
 **Global transformer detection:** Before flagging casing mismatches, check if the project has a global response transformer:
 - axios interceptor that converts snake_case to camelCase (e.g., `camelcaseKeys` library in response interceptor)
 - API client wrapper that applies `humps`, `camelcase-keys`, or similar library
 - Framework-level configuration (e.g., Angular `HttpClient` with custom interceptor)
 
-If a global transformer is detected, adjust field comparisons to account for the transformation. Print: `"Global response transformer detected: <description>. Adjusting field name comparisons."`
+If a global transformer is detected, adjust field comparisons to account for the transformation. Print: `"Global response transformer detected: <description>. Adjusting field name comparisons."` Note: a global transformer does NOT eliminate the need for normalizer analysis — normalizers may remap fields beyond what the global transformer handles.
 
-### Step 4e: Inter-Service DTO Alignment
+### Step 4e: Hardcoded Fallback Detection
+
+For each frontend API call, scan for fallback chains where the page attempts multiple field names before falling back to a hardcoded default value.
+
+**De-duplication with Step 4d:** If Step 4d already recorded field names from a fallback chain during normalizer analysis, do NOT create a duplicate finding. Instead, use the field names already recorded and apply the severity classification below. One finding per fallback chain, attributed to Step 4e.
+
+**Detection patterns:**
+1. **Nullish coalescing chains:** `res?.field_a ?? res?.field_b ?? 'DEFAULT'`
+2. **Logical OR chains:** `res?.field_a || res?.field_b || 'HARDCODED'`
+3. **Ternary fallbacks:** `res?.field_a ? res.field_a : 'FALLBACK'`
+4. **Default parameter patterns:** `const val = res?.field_a; display(val || 'PLACEHOLDER')`
+5. **Default destructuring:** `const { auth_code = 'DEMO-12345' } = res || {}` — the default value activates when the field is missing or undefined.
+6. **Variable-referenced defaults:** `const DEFAULT_CODE = 'DEMO-12345'; const code = res?.auth_code || DEFAULT_CODE;` — trace the variable to its assigned value to determine if it is a hardcoded string.
+7. **Utility function wrappers:** `getOrDefault(res, 'auth_code', 'DEMO')`, `_.get(res, 'auth_code', 'DEMO')`, `lodash.get()` with a third argument — the third argument is the fallback value.
+
+For each fallback chain found:
+1. Extract ALL field names attempted (e.g., `auth_code`, `code`).
+2. Check each attempted field name against the backend response shape (Step 4b) and normalizer output (Step 4c).
+3. If **at least one** attempted field exists → MEDIUM (fallback chain present but at least partially functional).
+4. If **NONE** of the attempted field names exist and the fallback is a hardcoded string/value → **HIGH: hardcoded fallback masking a field mismatch.** The user always sees the fallback value; the real data is never displayed.
+
+**Severity escalation via cross-reference with Step 4d:** If Step 4d already flagged the same field as CRITICAL (missing from response or normalizer gap), ANY non-trivial fallback value on that field is escalated to HIGH regardless of value appearance. This prevents plausible-looking stub values (e.g., `'active'`, `'pending'`) from being dismissed as intentional defaults when the field itself doesn't exist.
+
+**Distinguishing real defaults from masked mismatches:**
+- A fallback to `0`, `false`, `[]`, `null`, or `undefined` is typically an intentional default → MEDIUM at most.
+- A fallback to a specific string like `'DEMO-12345'`, `'N/A'`, `'Unknown'`, or `'Loading...'` when the response SHOULD provide the value → HIGH.
+- A fallback to a UUID, email, or domain-specific format string (e.g., `'example.com'`, `'user@test.com'`) → HIGH (likely stub data).
+- **Cross-reference override:** If the attempted field name was flagged CRITICAL in Step 4d, treat any non-trivial fallback as HIGH — the value appearance is irrelevant when the field provably doesn't exist.
+
+### Step 4f: Inter-Service DTO Alignment
 
 **Only execute this step if the project has multiple backend services that call each other.**
 
@@ -316,7 +432,7 @@ Detection: Look for HTTP client classes/functions that make calls to internal se
 
 **If the project is a monolith or single-service:** Skip this step silently.
 
-### Step 4f: Database Schema → Model Alignment
+### Step 4g: Database Schema → Model Alignment
 
 **Discover database schema from migration files.** Search for:
 
@@ -440,6 +556,18 @@ Field Shape Audit:
          Frontend reads:  d.domain → MISSING in response
          Fix: frontend should read d.name (or backend should add @JsonProperty("domain"))
 
+  [CRIT] NORMALIZER GAP: GET /api/v1/items
+         Backend sends: isActive (ItemModel.java:42)
+         Normalizer maps: title, created (api.js:88-90)
+         Page reads: item.is_active (items-page.js:67)
+         Normalizer does NOT bridge isActive ↔ is_active
+         Fix: add is_active: item.isActive to normalizer, or use item.isActive in page
+
+  [CRIT] DERIVED FIELD ORDERING: GET /api/v1/items
+         Normalizer: { ...item, direction: item.type, label: direction === 'x' ? 'A' : 'B' }
+         label references direction (sibling property) — undefined in JS
+         Fix: extract direction to a variable before the object literal
+
   [CRIT] Inter-service: user-service → billing-service
          Server sends:  { owner_id: string }  (from @JsonProperty)
          Client expects: { ownerId: string }  (from @JsonProperty)
@@ -448,6 +576,11 @@ Field Shape Audit:
   [CRIT] INSERT INTO domains (DomainRepository.java:78)
          Column status: NOT NULL constraint
          Code path DomainService.create() does NOT set this field
+
+  [HIGH] HARDCODED FALLBACK: GET /api/v1/domains/authcode
+         Backend sends: authorizationCode (DomainResource.java:876)
+         Page reads: res?.auth_code || res?.code || 'DEMO-12345' (domains.js:187)
+         Neither auth_code nor code exist — always shows 'DEMO-12345'
 
   [HIGH] PUT /api/v1/credentials
          Backend returns: { created_at: string }
@@ -479,6 +612,8 @@ Only execute this step if `--fix` was provided. If not, skip to chain point.
 
 **Safe auto-fixes for field shape findings:**
 - **Frontend casing correction:** When frontend reads `createdAt` but backend sends `created_at` and no global transformer exists — add the field to a normalizer or rename the access. Only fix if there is exactly one candidate match.
+- **Normalizer gap bridging:** When a normalizer exists with a spread (`...item`) and the page reads a snake_case name while the backend sends the camelCase equivalent — insert a single key-value pair into the existing object literal (e.g., add `is_active: item.isActive`). Do NOT restructure, refactor, or rewrite the normalizer function. Only fix if the normalizer already uses the spread pattern and there is exactly one candidate field match.
+- **Derived field ordering fix:** When a normalizer object literal references a sibling property — extract the referenced computation into a `const` variable immediately before the object literal. Do NOT restructure the normalizer. Only fix if the variable extraction is unambiguous.
 - **Missing `@JsonProperty` annotation:** When an inter-service DTO field name doesn't match the wire name, add the correct annotation to the client DTO. Only fix if there is exactly one candidate match.
 
 **Do NOT auto-fix:**
@@ -486,11 +621,13 @@ Only execute this step if `--fix` was provided. If not, skip to chain point.
 - Auth mechanism differences (requires architectural decision).
 - Missing backend routes (requires backend work).
 - Response field mismatches where the frontend reads a completely different name (e.g., `domain` vs `name`) — requires product decision on which side to change.
+- Hardcoded fallback removals — the fallback may be intentional during a migration period. Create a task instead.
+- No-spread normalizers that drop backend fields (`passThrough: false`) — the selective mapping may be intentional. The normalizer was explicitly designed to exclude certain fields. Create a task instead.
 - NOT NULL violations (requires understanding the data model — create a task instead).
 - Database schema mismatches (column type changes need migration planning).
 - Any fix that would modify more than 5 files (too broad — create a task instead).
 
-After applying fixes, re-run Steps 4-6 to recalculate the score and update the report. Print before/after scores.
+After applying fixes, re-run Steps 4–6 to recalculate the score and update the report. Print before/after scores.
 
 ## Chain Point
 
@@ -517,6 +654,9 @@ This is a standalone skill — no auto-chain propagation. No `--auto` flag.
 - Do NOT flag casing mismatches as CRITICAL if a global response transformer (camelcaseKeys, humps, etc.) is detected — downgrade to LOW.
 - Do NOT recurse into nested response types deeper than 3 levels — diminishing returns and risk of circular references.
 - Do NOT assume a single naming strategy per project — different endpoints may use different DTOs with different annotations.
-- Do NOT flag inter-service DTO mismatches for projects that are clearly single-service — skip Step 4e silently.
+- Do NOT assume a spread operator (`...item`) passes fields under transformed names — it passes them under their original backend wire names. If the backend sends `isActive` and the normalizer does `{ ...item }`, the output has `isActive`, NOT `is_active`.
+- Do NOT flag a normalizer gap when the page accesses the field by its exact backend wire name and a spread passes it through — that's correct behavior.
+- Do NOT flag derived field ordering bugs in languages where object literal property definitions CAN reference earlier siblings (e.g., Python dicts with walrus operator) — this check is JavaScript/TypeScript specific.
+- Do NOT flag inter-service DTO mismatches for projects that are clearly single-service — skip Step 4f silently.
 - Do NOT flag NOT NULL violations when the column has a DEFAULT value in the migration — the DB handles it.
 - Do NOT parse migration files outside the project root — only read files within the repository.
