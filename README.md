@@ -2,7 +2,7 @@
 
 Autonomous project management for Claude Code. Roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native.
 
-CC-Master is a Claude Code plugin that adds 36 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
+CC-Master is a Claude Code plugin that adds 37 composable skills forming a complete development pipeline: understand your codebase, analyze competitors, plan features, track work on a text kanban board, implement in isolated worktrees, and validate with automated QA loops.
 
 ## Install
 
@@ -43,13 +43,13 @@ Then inside Claude Code:
                                 │
 /cc-master:spec         →  subtasks with dependencies + verified API contracts
                                 │
-/cc-master:build        →  implementation in isolated worktree (contract-first gate for API tasks)
+/cc-master:build        →  implementation in isolated worktree (contract-first + post-build trace gates)
                                 │
-/cc-master:qa-loop      →  qa-review ↔ qa-fix until passing
+/cc-master:qa-loop      →  qa-review ↔ qa-fix until passing (versioned review reports)
                                 │
 /cc-master:qa-ui-review →  browser E2E testing, creates tasks for findings (optional)
                                 │
-/cc-master:complete     →  PR (default) or merge with --merge, update kanban
+/cc-master:complete     →  compile/test gate → PR (default) or merge with --merge, update kanban
 ```
 
 Each skill is standalone — run any skill independently or chain them for the full pipeline.
@@ -86,7 +86,7 @@ Skills are organized by phase. See `docs/skills/` for full documentation on ever
 | [Planning](docs/skills/planning.md) | `competitors`, `roadmap`, `research` |
 | Task Management | `kanban`, `kanban-add` |
 | [Implementation](docs/skills/implementation.md) | `spec`, `contract-first`, `build`, `scaffold`, `debug`, `hotfix`, `test-gen` |
-| [Quality](docs/skills/quality.md) | `qa-review`, `qa-fix`, `qa-loop`, `qa-ui-review`, `smoke-test`, `stub-hunt`, `api-payload-audit`, `config-audit`, `config-sync`, `align-check`, `gap-check`, `api-contract`, `doc-review`, `perf-audit` |
+| [Quality](docs/skills/quality.md) | `qa-review`, `qa-fix`, `qa-loop`, `qa-ui-review`, `smoke-test`, `stub-hunt`, `api-payload-audit`, `config-audit`, `config-sync`, `align-check`, `gap-check`, `api-contract`, `doc-review`, `perf-audit`, `hooks-setup` |
 | [Completion & Docs](docs/skills/completion.md) | `complete`, `pr-review`, `release-docs`, `dev-guide`, `user-guide`, `openapi-docs` |
 
 ---
@@ -108,7 +108,7 @@ Chains: → roadmap (prompted or auto)
 | `--auto` | Skip chain point prompt, continue to roadmap automatically |
 | `--update` | Incremental refresh — re-traces only modules changed since last run |
 
-**`/cc-master:trace`** — Single-feature depth tracing. Follows the complete execution path for one feature from entry point to leaf, detects bugs and risks at each node, creates kanban tasks for findings.
+**`/cc-master:trace`** — Single-feature depth tracing. Follows the complete execution path for one feature from entry point to leaf, detects bugs and risks at each node, creates kanban tasks for findings. Produces both human-readable markdown and machine-consumable JSON with per-step status and runtime value notes.
 
 Narrower and faster than discover — one feature at full depth.
 
@@ -116,8 +116,16 @@ Narrower and faster than discover — one feature at full depth.
 Usage:  /cc-master:trace <task-id>
         /cc-master:trace "feature name"
         /cc-master:trace src/routes/checkout.ts:handleCheckout [--depth <1-20>]
-Output: .cc-master/traces/<slug>.md
+        /cc-master:trace --flow domain-checkout
+        /cc-master:trace <target> --diff <previous-trace-slug>
+Output: .cc-master/traces/<slug>.md + .cc-master/traces/<slug>.json
 ```
+
+| Flag | Effect |
+|------|--------|
+| `--depth <n>` | Trace depth limit (1-20, default: 10) |
+| `--flow <name>` | Resolve entry point from discovery.json key_flows |
+| `--diff <slug>` | Compare against a previous trace — shows fixed, regressed, and new steps |
 
 ---
 
@@ -220,7 +228,7 @@ Usage:  /cc-master:contract-first
 
 Runs a 5-step trace per endpoint: find server handler → trace proxy layer → document parameters → trace response shape → write verified contract types. Integrated into the spec→build pipeline as a mandatory gate for API-crossing tasks.
 
-**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models, marks linked roadmap features as delivered, closes linked GitHub Issues, and runs `api-contract` verification if the build touched API calls.
+**`/cc-master:build`** — Implements in an isolated git worktree. Groups subtasks into dependency waves, dispatches parallel agents. Enforces production quality — no TODOs, no stubs, no mock data. Agents apply [deep trace verification](docs/deep-trace-verification.md) before marking subtasks complete. On success, automatically updates `discovery.json` with new routes/services/models, marks linked roadmap features as delivered, closes linked GitHub Issues, runs `api-contract` verification if the build touched API calls, and runs a mandatory post-build `trace` to verify the execution chain is connected end-to-end before proceeding to QA.
 
 ```
 Usage:  /cc-master:build <id> [--auto]
@@ -258,14 +266,15 @@ Usage:  /cc-master:test-gen <file|glob|directory> [--runner <framework>] [--cove
 
 ### Quality Assurance
 
-**`/cc-master:qa-review`** — Scored validation against spec and acceptance criteria. Applies [deep trace verification](docs/deep-trace-verification.md) to follow each criterion to an actual leaf. Checks functional correctness, code quality, security, test coverage, and production readiness.
+**`/cc-master:qa-review`** — Scored validation against spec and acceptance criteria. Applies [deep trace verification](docs/deep-trace-verification.md) to follow each criterion to an actual leaf. Checks functional correctness, code quality, security, test coverage, and production readiness. Review reports are versioned per iteration with score trend tracking.
 
 ```
 Usage:  /cc-master:qa-review <task-id>
-Output: .cc-master/specs/<task-id>-review.json
+Output: .cc-master/specs/<task-id>-review-<iteration>.json (versioned)
+        .cc-master/specs/<task-id>-review.json (latest copy for compatibility)
 ```
 
-Pass threshold: score ≥ 90, zero unmet criteria, zero critical/high findings.
+Pass threshold: score ≥ 90, zero unmet criteria, zero critical/high findings. Each iteration includes `previous_score` and `score_trend` array so agents can detect regression.
 
 **`/cc-master:qa-fix`** — Triages review findings and applies targeted fixes.
 
@@ -299,12 +308,19 @@ Testing layers:
 
 Pass threshold: score ≥ 80, zero critical findings.
 
-**`/cc-master:smoke-test`** — Post-deploy browser smoke test. Visits every discoverable route, intercepts all API calls, flags failures. Fast pass (2-3 minutes), not a full QA review.
+**`/cc-master:smoke-test`** — Post-deploy browser smoke test. Two modes: full browser automation (visits every discoverable route, 2-3 minutes) or targeted endpoint mode (HTTP-only, seconds).
 
 ```
 Usage:  /cc-master:smoke-test <url> [--user <name> --pass <pw>] [--cookie <name=value>]
+        /cc-master:smoke-test <url> --endpoints /api/v1/users,/api/v1/orders
 Output: .cc-master/smoke-tests/<run-id>-report.json
 ```
+
+| Flag | Effect |
+|------|--------|
+| `--endpoints <list>` | Targeted mode — HTTP requests to specific paths only (no browser automation) |
+| `--user`/`--pass` | Basic auth credentials |
+| `--cookie` | Cookie-based auth |
 
 **`/cc-master:stub-hunt`** — Live runtime stub and mock data detection. Opens the running app in a browser, navigates every page, detects placeholder content and developer artifacts visible to real users.
 
@@ -332,6 +348,15 @@ Output: .cc-master/config-audit/<timestamp>-report.json
 ```
 Usage:  /cc-master:config-sync
 Output: .cc-master/config-sync/<timestamp>-report.json
+```
+
+**`/cc-master:hooks-setup`** — Generate Claude Code hook configuration that enforces the cc-master pipeline. Configures three hooks: a PreToolUse gate that blocks `git commit` and `gh pr create` without passing compile/test/trace gates, a UserPromptSubmit reminder when commit/deploy intent is detected, and a Stop warning for uncommitted ungated changes. Also generates a project-specific `.cc-master/run-gates.sh` script from `discovery.json` that compiles, tests, and checks traces.
+
+```
+Usage:  /cc-master:hooks-setup
+Output: .claude/settings.json (hooks merged in)
+        .cc-master/run-gates.sh (project-specific gate runner)
+        .gates-passed.json (ephemeral — auto-added to .gitignore)
 ```
 
 **`/cc-master:align-check`** — Three-way alignment: original task → spec → code. Catches when a spec accurately describes code that does the wrong thing.
@@ -363,7 +388,7 @@ Output: .cc-master/api-contracts/<timestamp>-contract-report.json
 
 ### Completion & Documentation
 
-**`/cc-master:complete`** — Creates a pull request (default) or merges to main after QA passes. Never merges without explicit `--merge`.
+**`/cc-master:complete`** — Creates a pull request (default) or merges to main after QA passes. Mandatory compile and test verification runs before any PR or merge — blocks on test failures. Test results are included in the PR body. Never merges without explicit `--merge`.
 
 ```
 Usage:  /cc-master:complete <id> [--pr] [--merge] [--target <branch>] [--auto]
@@ -409,10 +434,12 @@ CC-Master stores project-level state in `.cc-master/` at the project root:
 ├── kanban.json                 # Persisted task board (survives context clears)
 ├── specs/                      # Per-task specs and review reports
 │   ├── <task-id>.md
-│   ├── <task-id>-review.json
+│   ├── <task-id>-review.json          # Latest review (compatibility)
+│   ├── <task-id>-review-<N>.json      # Versioned per iteration
 │   └── <task-id>-align.json
 ├── traces/                     # Single-feature trace outputs
-│   └── <slug>.md
+│   ├── <slug>.md               # Human-readable trace
+│   └── <slug>.json             # Machine-consumable trace (steps, findings, chain status)
 ├── insights/
 │   ├── sessions.json
 │   └── pending-suggestions.json
@@ -430,7 +457,7 @@ Add `.cc-master/` to your `.gitignore`.
 
 Skills compose through JSON artifacts:
 
-- `discover` writes `discovery.json` → `roadmap` reads it
+- `discover` writes `discovery.json` → consuming skills (`trace`, `spec`, `build`, `qa-review`) check staleness and warn if >7 days old
 - `competitors` writes `competitor_analysis.json` → `roadmap` reads it (optional)
 - `roadmap` writes `roadmap.json` → `kanban-add` reads it
 - `kanban-add` resolves competitor evidence, creates tasks → `kanban` renders them
@@ -485,6 +512,15 @@ Each skill works standalone.
 ### Verification only
 
 ```bash
+# Trace a feature using a named flow from discovery
+/cc-master:trace --flow domain-checkout
+
+# Re-trace after a fix and diff against previous
+/cc-master:trace --flow domain-checkout --diff domain-checkout-20260401
+
+# Smoke-test specific endpoints after a deploy
+/cc-master:smoke-test https://app.example.com --endpoints /api/v1/users,/api/v1/orders
+
 # Check alignment between task, spec, and code
 /cc-master:align-check 3
 
@@ -496,6 +532,9 @@ Each skill works standalone.
 
 # Audit for N+1 queries and performance issues
 /cc-master:perf-audit --focus db
+
+# Set up pipeline enforcement hooks
+/cc-master:hooks-setup
 ```
 
 ## License

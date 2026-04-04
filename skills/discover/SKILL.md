@@ -46,7 +46,7 @@ Process the output:
 - Deduplicate (some files appear multiple times across commits)
 - Filter OUT non-source files: paths containing `node_modules/`, `.git/`, `dist/`, `build/`, `__pycache__/`, `.venv/`, `vendor/`; files ending in `.lock`, `.sum`, `.jar`, `.class`, `.pyc`; paths ending in `/` (directories)
 
-If the filtered list is empty: print `"No source files changed since <discovered_at>. discovery.json is up to date."` and stop.
+If the filtered list is empty: update the `discovered_at` timestamp in `discovery.json` to the current UTC ISO-8601 timestamp (so subsequent staleness checks see a fresh date), print `"No source files changed since <discovered_at>. Timestamp refreshed. discovery.json is up to date."` and stop.
 
 Print: `"Changed source files since last discovery: <count> files"`
 
