@@ -12,8 +12,9 @@ Run the full quality gate cycle: review -> fix -> re-review, looping until the i
 Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
 Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
+**Initialize:** If `.cc-master/kanban.json` does not exist, create the `.cc-master/` directory if it does not exist, then create the file with `{"version":1,"next_id":1,"tasks":[]}` before proceeding.
+
 **Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
-If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
 
 **Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
 

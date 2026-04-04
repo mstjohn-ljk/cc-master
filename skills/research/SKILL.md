@@ -14,8 +14,9 @@ Research software development topics with structured web searches, parallel fetc
 Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
 Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
+**Initialize:** If `.cc-master/kanban.json` does not exist, create the `.cc-master/` directory if it does not exist, then create the file with `{"version":1,"next_id":1,"tasks":[]}` before proceeding.
+
 **Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
-If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
 
 **Create:** Read file → assign `id = next_id` → increment `next_id` → append task → set `created_at` and `updated_at` → write back.
 

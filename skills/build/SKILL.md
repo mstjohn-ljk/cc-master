@@ -29,8 +29,9 @@ Implement spec'd tasks by dispatching subtasks to agents in dependency waves. Us
 Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
 Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
+**Initialize:** If `.cc-master/kanban.json` does not exist, create the `.cc-master/` directory if it does not exist, then create the file with `{"version":1,"next_id":1,"tasks":[]}` before proceeding.
+
 **Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
-If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
 
 **Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
 
@@ -111,6 +112,8 @@ Before any implementation begins, submit the spec(s) to `debate:all` for multi-A
 **In `--auto` mode with `--debate`:** If debate produces concerns, print them and automatically stop (do not proceed). Print: `"Stopped — debate raised concerns. Revise the spec with /cc-master:spec <id>, then re-run /cc-master:build <id> --debate."` Auto mode should not override human-intended design reviews.
 
 ### Step 2: Read Specs and Collect Subtasks
+
+**Discovery staleness check:** Before reading specs, check if `.cc-master/discovery.json` exists. If it does, read the `discovered_at` timestamp. If it is older than 7 days, print: `"⚠ Discovery is N days stale. Consider running cc-master:discover --update for accurate context."` Continue with the stale data but note that agent context may be based on outdated architecture understanding.
 
 **Single-task mode (unchanged):**
 1. Read the spec file from `.cc-master/specs/`
@@ -423,6 +426,42 @@ If API calls were touched:
    - Continue to Step 8
 
 This prevents the exact class of bugs where build agents write code with wrong API paths, parameter names, or response shapes that compile fine but fail at runtime.
+
+### Step 7d: Mandatory Post-Build Trace
+
+**MANDATORY: Execute this step for every task where verification PASSED in Step 6.** This step MUST complete before proceeding to Step 8.
+
+Run `cc-master:trace` on the primary feature that was just built. Determine the trace target:
+1. Read the spec's "Files to Modify" section — use the first entry that is a route, handler, controller, or CLI command entry as the trace entry point.
+2. If no suitable entry point is found in "Files to Modify", use the feature description or task title as a feature name for trace's feature-name mode.
+
+Invoke the Skill tool with `skill: "cc-master:trace"` and `args: "<entry-point-or-feature-name>"`. Wait for the trace to complete and produce a `.cc-master/traces/<slug>.json` file.
+
+**Evaluate the trace result:**
+
+Read the trace JSON. Check the `status` field and `findings` array.
+
+**If the trace status is `broken_chain` or any finding has severity `CRITICAL` or `HIGH`:**
+- Do NOT proceed to Step 8 (qa-review chain)
+- Print:
+  ```
+  Post-build trace FAILED: <status>
+  Findings: <count> CRITICAL, <count> HIGH
+    [CRITICAL] <title> — <file>:<line>
+    [HIGH] <title> — <file>:<line>
+
+  The execution chain is broken. Fix the issues above before QA.
+  ```
+- Store the trace path in the task's metadata: update kanban.json with `metadata.post_build_trace = "traces/<slug>.json"`
+- Set the task's `metadata.phase` to `"trace-failed"` in kanban.json
+- Stop. Do not chain to qa-review or qa-loop.
+
+**If the trace status is `all_connected` with no `CRITICAL` or `HIGH` findings:**
+- Store the trace path in the task's metadata: update kanban.json with `metadata.post_build_trace = "traces/<slug>.json"`
+- Print: `"Post-build trace PASSED: all_connected, no critical/high findings."`
+- Proceed to Step 8
+
+**In multi-task mode:** Run the trace for each passing task sequentially before entering the autonomous pipeline in Step 8. If any task's trace fails, exclude it from the passing set (same as a verification failure).
 
 ### Step 8: Chain Point / Autonomous Pipeline
 

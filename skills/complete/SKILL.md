@@ -12,8 +12,9 @@ Create a PR (default) or merge to main (with explicit `--merge`), close tasks on
 Tasks are persisted to `.cc-master/kanban.json` — the sole source of truth.
 Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
+**Initialize:** If `.cc-master/kanban.json` does not exist, create the `.cc-master/` directory if it does not exist, then create the file with `{"version":1,"next_id":1,"tasks":[]}` before proceeding.
+
 **Read:** Use the Read tool on `.cc-master/kanban.json` and parse the JSON.
-If the file is missing, treat as empty: `{"version":1,"next_id":1,"tasks":[]}`
 
 **Update:** Read file → find task by `id` → modify fields → set `updated_at` → write back.
 
@@ -99,6 +100,60 @@ Build and QA agents frequently leave uncommitted changes in the worktree. If the
 - Run the commit step only **once** (on the first task processed). All tasks share the same worktree, so one commit captures everything.
 - For subsequent tasks in the batch, skip this step (the worktree is already clean from the first task's commit).
 
+### Step 2b: Mandatory Compile and Test Verification
+
+**MANDATORY: This step MUST complete successfully before any merge or PR operation. Do NOT skip this step.**
+
+1. **Identify affected modules.** Run `git diff --name-only HEAD` (or `git diff main --name-only` if in a worktree) to list all changed files. Cross-reference with `.cc-master/discovery.json` if it exists:
+   - If `discovery.json` exists: match changed file paths against `modules[].path` to identify affected modules. Use `tech_stack.build_tools` and `tech_stack.test_tools` to determine the compile and test commands for each module.
+   - If `discovery.json` does not exist: detect the project type from standard conventions — look for `package.json` (npm/yarn), `pom.xml` (Maven), `build.gradle` (Gradle), `Cargo.toml` (Cargo), `go.mod` (Go), `pyproject.toml`/`setup.py` (Python), `Makefile`, etc. Use the corresponding standard compile and test commands.
+
+2. **Compile each affected module.** Run the compile/build command for each module. Common patterns (detect from discovery or conventions):
+   - Node.js: `npm run build` or `npx tsc --noEmit`
+   - Java/Maven: `mvn compile -pl <module> -am`
+   - Java/Gradle: `./gradlew :<module>:compileJava`
+   - Go: `go build ./...`
+   - Rust: `cargo check`
+   - Python: `python -m py_compile` on changed files, or `mypy` if configured
+   If compilation fails, print the errors and STOP. Do not proceed to PR/merge.
+
+3. **Run tests for each affected module.** Run the test command for each module. Common patterns:
+   - Node.js: `npm test` or `npx vitest run`
+   - Java/Maven: `mvn test -pl <module> -am`
+   - Java/Gradle: `./gradlew :<module>:test`
+   - Go: `go test ./...`
+   - Rust: `cargo test`
+   - Python: `pytest`
+
+4. **Parse test output.** Extract from each test run: pass count, fail count, error count, skip count. If the test runner does not provide structured output, parse the summary line.
+
+5. **Evaluate results.** If any test failures exist, check the project's `CLAUDE.md` for documented pre-existing infrastructure failures that should be excluded. If failures remain after excluding known pre-existing issues, BLOCK the completion:
+   ```
+   BLOCKED: Test failures detected. Cannot proceed to PR/merge.
+
+   Module: <module-name>
+     Tests: <passed> passed, <failed> FAILED, <errors> errors, <skipped> skipped
+     Failures:
+       - <test name>: <failure reason>
+
+   Fix the failing tests before completing this task.
+   ```
+   Stop here. Do not proceed to Step 3.
+
+6. **Store test results in task metadata.** Update kanban.json for the task:
+   ```json
+   "metadata": {
+     "test_results": {
+       "modules": {
+         "<module-name>": {"passed": 0, "failed": 0, "errors": 0, "skipped": 0}
+       },
+       "all_passing": true
+     }
+   }
+   ```
+
+7. **Remember results for PR description.** The test results summary will be included in the PR body under a `## Test Results` section in Step 4.
+
 ### Step 3: Determine Completion Method (Merge vs PR)
 
 **Completed tasks must NEVER be merged directly to main without explicit user approval.** The default behavior is to create a pull request.
@@ -176,6 +231,12 @@ gh pr create \
 Score: <score>/100
 Iterations: <count>
 All acceptance criteria met.
+
+## Test Results
+<For each module from Step 2b results:>
+- **<module-name>**: <passed> passed, <failed> failed, <errors> errors, <skipped> skipped
+
+All tests passing.
 
 ## Spec
 See .cc-master/specs/<task-id>.md"
@@ -316,4 +377,6 @@ Run /cc-master:kanban to see the updated board.
 - Do not treat deploy failure as a reason to undo or retroactively fail the merge/PR
 - Do not execute the health-check URL before completing SSRF validation
 - Do not buffer deploy script output — stream it in real-time so the user can see progress
+- Do not skip the compile and test verification in Step 2b — every completion must prove tests pass before PR/merge
+- Do not proceed to PR/merge if any test failures exist (excluding documented pre-existing infrastructure failures)
 - Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — use kanban.json exclusively
