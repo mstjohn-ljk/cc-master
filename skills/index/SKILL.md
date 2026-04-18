@@ -40,7 +40,7 @@ These rules apply to ALL argument parsing and filesystem handling across this sk
 
 ## Process
 
-_This section is filled in by a later subtask._
+The skill runs in six sequential steps (Steps 1–6 below). The `## Parsers` and `## Content Hashing` sections define reusable utilities that Steps 4, 5, and the `## --touch Single-File Refresh` section invoke. Argument parsing happens in Step 1; Steps 2–3 boot the Kuzu binding and the graph schema; Step 4 sweeps absent files out of the graph; Step 5 upserts the file set (or a narrowed subset if `--module` was given); Step 6 prints the summary and closes the database. When `--touch <file>` is set, Steps 4 and 5 are skipped and control passes to the `## --touch Single-File Refresh` section immediately after Step 3.
 
 ## Parsers
 
@@ -203,7 +203,7 @@ The indexer tracks per-file content hashes in the `_source` metadata table (sche
 
 These rules are the skill's implementation of the "Hash computation rules" section in `docs/plans/2026-04-graph-engine-v1.md` (lines 326-330). If this skill and the design doc ever diverge, the design doc is authoritative — reconcile before writing new code.
 
-The three hash rules below correspond one-to-one with the design doc's three file-type cases. The hash-compare logic that USES these functions (reads `_source.content_hash`, compares, decides whether to skip) is wired by a later subtask — this section defines only the function contracts.
+The three hash rules below correspond one-to-one with the design doc's three file-type cases. The hash-compare logic that USES these functions — reading `_source.content_hash`, comparing against the freshly-computed hash, and deciding whether to skip the full-replace — lives in Step 5.2b (default pass) and Substep T.3 of the `## --touch Single-File Refresh` section. This section defines only the function contracts.
 
 ### Hash rule: JSON artifacts
 
@@ -295,7 +295,7 @@ Every hash function (JSON, markdown, module-walk) returns a two-field result:
 - **Success:** `{"hash": "<64-char-hex>"}` — the hash field contains a lowercase hex SHA-256 digest.
 - **Failure:** `{"hash": null, "error": "<description>"}` — the hash field is explicitly null, and the error field contains a one-line human-readable cause (e.g., `"permission denied"`, `"invalid JSON: Expecting value: line 1 column 1"`, `"file vanished between enumeration and hash"`).
 
-Callers (the hash-compare logic in later subtasks) MUST check for `hash is null` before comparing. When null, the caller forces re-index (full-replace) and increments `hash_errors`, as described above. A null hash is NEVER written to `_source.content_hash` — the column is populated only on successful hash computation, and when a force-re-index path produces a successful hash later in the same pass, that later hash is the value stored.
+Callers (the hash-compare logic in Step 5.2b and Substep T.3) MUST check for `hash is null` before comparing. When null, the caller forces re-index (full-replace) and increments `hash_errors`, as described above. A null hash is NEVER written to `_source.content_hash` — the column is populated only on successful hash computation, and when a force-re-index path produces a successful hash later in the same pass, that later hash is the value stored.
 
 ### Step 1: Parse Arguments
 
@@ -304,11 +304,11 @@ Record a wall-clock start timestamp as the very first action of this step (e.g.,
 `cc-master:index` accepts a small, fixed set of invocations:
 
 - `cc-master:index` (no args) — the default pass: iterate the canonical file set described in Step 5.1 and upsert every source.
-- `cc-master:index --full` — accepted and plumbed through. In this subtask `--full` does NOT yet change behavior (hash-skipping is wired by a later subtask); the flag is recognized, its presence is remembered, and Step 6 surfaces it in the summary line so testers can confirm the path ran. Do not reject `--full`, but do not give it distinct behavior beyond the Step 6 prefix yet.
-- `cc-master:index --module <name>` — accepted. Validate `<name>` per the Module name rule in `## Input Validation Rules` (regex first, then membership in `discovery.json`). The module-scoped file-set narrowing is implemented by a later subtask; for THIS subtask, accept the flag, validate the name, and let Step 5 proceed with its canonical file set. Surface the unused-flag state in Step 6 the same way `--full` is surfaced.
-- `cc-master:index --touch <file>` — accepted. The flag is recognized, its value is captured and validated per the Path containment rule in `## Input Validation Rules` (full path-to-accepted-file-set validation is wired by a later subtask), and its presence is remembered for Step 5 (where later subtasks consume `touch_target` to scope the file set). For THIS subtask, accept the flag, remember its value, and let Step 5 proceed with its canonical file set.
+- `cc-master:index --full` — forces re-index regardless of `_source.content_hash`. Bypasses the hash-compare skip in Step 5.2b so every file takes the full-replace path; `_source.last_indexed_at` and `_source.indexer_version` refresh on every row. Surfaces a `(--full: forced re-index)` prefix on the Step 6 summary line.
+- `cc-master:index --module <name>` — narrows the file set so only files owned by the named Module are re-indexed. Validate `<name>` per the Module name rule in `## Input Validation Rules` (regex first, then membership in `discovery.json`). Step 5.1 consumes the captured `module` value to filter the file set; see that step for the exact narrowing rules.
+- `cc-master:index --touch <file>` — single-file refresh. The flag is recognized, its value is validated per Substep 1.5b, and `touch_target` drives the dedicated execution path in `## --touch Single-File Refresh`. Steps 4 and 5 are skipped on the touch path — see that section for full semantics.
 
-**Substep 1.1 — Strip and validate `--touch <file>`.** If `--touch` appears as a whole token, the very next token is its value. Apply the Path containment rule from `## Input Validation Rules` to reject `..` escapes, null bytes, and paths that resolve outside the project root. If `--touch` appears with no following value (end of argument list, or next token is another flag), reject with: `"--touch requires a value. Usage: cc-master:index --touch <file>."` On success, set in-memory `touch_target = "<value>"` and remove both tokens (`--touch` and its value) from the working argument string. The full accepted-file-set validation (kanban.json / roadmap.json / discovery.json / specs/*.md) is wired by a later subtask — for THIS subtask, containment validation is sufficient.
+**Substep 1.1 — Strip `--touch <file>` for downstream validation.** If `--touch` appears as a whole token, the very next token is its value. If `--touch` appears with no following value (end of argument list, or next token is another flag), reject with: `"--touch requires a value. Usage: cc-master:index --touch <file>."` On success, set in-memory `touch_target = "<value>"` and remove both tokens (`--touch` and its value) from the working argument string. The full validation of the value (null-byte + `..` pre-check, containment, archive-subdir, accepted-file-set, case-exactness, canonicalization) runs in Substep 1.5b after the mutual-exclusion check in 1.5 passes.
 
 **Substep 1.2 — Strip and remember `--full`.** If `--full` appears as a whole token in the argument list, set an in-memory flag `full = true` and remove that token from the working argument string. `--full` takes no value; if the next token in the argument list happens to be another flag, that is fine — do not consume it as a value.
 
@@ -339,13 +339,13 @@ Record a wall-clock start timestamp as the very first action of this step (e.g.,
 
   8. **Case-exactness check.** The earlier realpath call resolved symlinks but does NOT normalize case on case-insensitive filesystems (macOS default APFS, Windows NTFS). Extract the final path component (basename) from `input_path_resolved` and compare it BYTE-FOR-BYTE against the final component of `rel_path` as supplied by the user. If the user-supplied casing does not match the on-disk casing recorded in `input_path_resolved`, reject with: `"--touch: path case does not match filesystem. Use the exact casing as it appears on disk."` This keeps Linux (case-sensitive) and macOS (case-insensitive) behaving identically — the indexer refuses ambiguous casing everywhere.
 
-  9. **Do NOT stat or verify existence.** This substep validates the argument FORM only. Whether the file actually exists on disk is the single-file execution path's concern in a later subtask (absence triggers the missing-file branch there). Verifying existence here would couple argument parsing to filesystem state and leak validation across step boundaries.
+  9. **Do NOT stat or verify existence.** This substep validates the argument FORM only. Whether the file actually exists on disk is the concern of the `## --touch Single-File Refresh` section's Substep T.1 — a missing file there triggers the absence-handling branch. Verifying existence here would couple argument parsing to filesystem state and leak validation across step boundaries.
 
   10. **Canonicalize for downstream.** On success, overwrite `touch_target` with `rel_path` (the project-root-relative form). Every downstream consumer — Step 5's file-set narrowing, Step 6's summary line — then sees `.cc-master/...` regardless of whether the user invoked with `./.cc-master/specs/3.md`, `/Users/.../project/.cc-master/specs/3.md`, or just `.cc-master/specs/3.md`.
 
 **Substep 1.6 — Unknown-flag rejection.** If the pre-validation step discovers a residual token that begins with `--`, it is an unrecognized flag. Reject with: `"Unknown flag '<flag>'. Valid flags: --full, --module <name>, --touch <file>."` Do not silently ignore — silent ignore of unknown flags is explicitly listed in `## What NOT To Do`.
 
-On successful argument parsing, proceed to Step 2. Carry the `full`, `module`, and `touch_target` values forward in memory for Step 5 (where later subtasks will use them) and Step 6 (where `full` influences the summary prefix).
+On successful argument parsing, proceed to Step 2. Carry the `full`, `module`, and `touch_target` values forward in memory: Step 5.1 consumes `module` to narrow the file set; Step 5.2b consumes `full` to bypass the hash-compare skip; Step 6 consumes `full` to prefix the summary line; `touch_target` (if set) dispatches to the `## --touch Single-File Refresh` section after Step 3.
 
 ### Step 2: Check Kuzu Availability
 
@@ -425,7 +425,7 @@ Every statement uses `IF NOT EXISTS`, making the step fully idempotent — re-ru
 12. `CREATE REL TABLE IF NOT EXISTS CONTAINS(FROM Module TO File)`
 13. `CREATE NODE TABLE IF NOT EXISTS _source(file_path STRING, content_hash STRING, last_indexed_at TIMESTAMP, node_count INT64, edge_count INT64, indexer_version STRING, PRIMARY KEY (file_path))`
 
-Statements 1-6 define the six v1 node tables (Task, Subtask, Spec, Feature, Module, File). Statements 7-12 define the six v1 edge tables. Statement 13 provisions the `_source` metadata table — the hash-diff bookkeeping surface that later steps (and later subtasks) use to decide whether a source artifact has changed since the last index pass.
+Statements 1-6 define the six v1 node tables (Task, Subtask, Spec, Feature, Module, File). Statements 7-12 define the six v1 edge tables. Statement 13 provisions the `_source` metadata table — the hash-diff bookkeeping surface that Step 4 (absence handling) and Step 5 (hash-compare skip and `_source` upsert) use to decide whether a source artifact has changed since the last index pass.
 
 On any non-zero exit from a `kuzu_client.py query` call, follow the contract table above. The offending statement is the one currently being executed — include it in the error output so the user (or the next skill iteration) can see exactly which DDL failed.
 
@@ -553,7 +553,7 @@ Call the captured string `current_indexer_version`. If the file is absent or the
 
 **Step 5.1 — Determine the file set.**
 
-For the no-flags path (which is all of v1 — `--full`, `--module`, and `--touch` are wired by subtask #41), the file set is the canonical list of cc-master JSON artifacts plus every non-archived spec on disk. Specifically:
+For the default path (no `--module`, no `--touch`), the file set is the canonical list of cc-master JSON artifacts plus every non-archived spec on disk. Specifically:
 
 1. `.cc-master/kanban.json` — if it exists on disk.
 2. `.cc-master/roadmap.json` — if it exists on disk.
@@ -564,7 +564,20 @@ For the no-flags path (which is all of v1 — `--full`, `--module`, and `--touch
 
 Build this set as an ordered list. JSON artifacts come first (kanban → roadmap → discovery), then specs in ascending numeric order of their task id. This ordering matters because the kanban parser's IMPLEMENTS edges reference Feature nodes (produced by roadmap), and the specs parser's TOUCHES edges reference Module nodes (produced by discovery). Upserting kanban first and specs last means the endpoint nodes exist by the time dependent edges are written. Edges whose endpoint still does not exist (because the referenced file was absent or excluded) are dropped silently per the no-dangling-edges rule from the Parsers section.
 
-Note: `--full`, `--module <name>`, and `--touch <file>` modify this set in later subtasks (#41). For this subtask, treat the canonical list above as the complete input.
+**Flag interactions with the file set:**
+
+- `--full` does NOT change the file set. It changes the *decision* each file takes in Step 5.2b (always full-replace, never skip). Every file in the canonical list still participates. See Step 5.2b's `--full` override.
+- `--touch <file>` does NOT reach Step 5.1 — the `## --touch Single-File Refresh` section intercepts the skill's flow after Step 3 and skips Steps 4 and 5 entirely. If `touch_target` is set, this step is not executed.
+- `--module <name>` narrows the file set as follows:
+  1. Always include `.cc-master/discovery.json` — without it, the Module node for `<name>` cannot be refreshed, and the narrowing below is meaningless.
+  2. DO include `.cc-master/kanban.json` only if at least one Task or Subtask in the kanban has `metadata.module == <name>` (a grep against the parsed kanban is sufficient). If no task references the module, skip kanban for this pass. Rationale: Tasks and Subtasks do not have a `module` property in the v1 node schema (see the design doc), but in projects that stamp `metadata.module` on tasks, the Task-to-Module relationship is preserved implicitly through the shared module name. When `--module` narrows the pass, only re-upserting kanban makes sense if some tasks reference the module.
+  3. DO include `.cc-master/roadmap.json` only if at least one feature has `module == <name>` in its record. Same rationale as kanban.
+  4. INCLUDE every spec file whose parsed `touches_modules` array contains `<name>`. This requires a lightweight pre-pass — parse each candidate spec's "Files to Modify" / "Files to Create" subsections and do the longest-prefix match against `Module.path` for `<name>` only. Specs that don't touch `<name>` are excluded from this pass.
+  5. The resulting ordered list is: `[discovery.json]` + (optional `kanban.json`) + (optional `roadmap.json`) + matching specs in ascending task-id order.
+  
+  After narrowing, Step 5 proceeds normally with the reduced set. Files NOT in the narrowed set are untouched: their `_source` rows, graph nodes, and graph edges remain from the previous pass. This is exactly what `--module` is for — targeted incremental indexing when only one module changed.
+
+- If `--full` AND `--module` are BOTH set (they are not mutually exclusive), the narrowing above applies AND every file in the narrowed set takes the full-replace path in 5.2b (no hash-skip). Counter semantics: `unchanged_count` stays 0, `changed_count` counts every file in the narrowed set.
 
 **Step 5.2 — For each file, call the matching parser.**
 
@@ -825,7 +838,7 @@ Maintain these counters across the entire pass (initialize to zero or empty at t
 - `files_failed` — list of `<file_path>` strings for every file that hit a Cypher error in 5.3 or a parser error in 5.2.
 - `unchanged_count` — number of files that were SKIPPED by the 5.2b hash-compare (both content hash and indexer version matched the `_source` row). Incremented only by 5.2b. Never incremented when `--full` is set, because `--full` bypasses the skip.
 - `changed_count` — number of files that proceeded through 5.3 full-replace successfully (i.e., DELETE and all INSERTs completed without a Cypher error). Incremented at the end of 5.3 on success. A file that fails in 5.3 is counted in `files_failed`, NOT in `changed_count`. When `--full` is set, every file that reaches 5.3 successfully counts toward `changed_count` regardless of hash state.
-- `deleted_count` — number of files that were present in `_source` at the start of the pass but are no longer on disk, and whose rows were therefore deleted. Populated by a later subtask (#45) that implements absent-file detection; initialize to `0` in this subtask and leave it at `0` until the absent-file sweep is wired.
+- `deleted_count` — number of files that were present in `_source` at the start of the pass but are no longer on disk, and whose rows were therefore deleted. Populated by Step 4 (absence handling) — incremented once per successful per-file absence sweep (DETACH DELETE of owned nodes plus `_source` row delete). Initialize to `0` at the start of Step 4.
 - `nodes_written` — sum of successful node CREATEs across all files. Increment after each `kuzu_client.py query` exits 0 for a node CREATE in 5.3 B.
 - `edges_written` — sum of successful edge CREATEs across all files (including the CONTAINS edges from 5.4). Increment after each `kuzu_client.py query` exits 0 for an edge CREATE in 5.3 C or a CONTAINS CREATE in 5.4.
 - `warnings` — list of pass-level warnings (e.g., `"CONTAINS finalization"` on a 5.4 error, `"specs parser: skipping non-standard filename foo.md"` bubbled up from the parser, `"_source read failed for <file_path> — forced full-replace (graph may need rebuild)"` from 5.2b).
