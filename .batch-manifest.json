@@ -1,7 +1,16 @@
 {
-  "batch_name": "batch-2-5-7-8-9-10-12",
-  "task_ids": [2, 5, 7, 8, 9, 10, 12],
-  "worktree_path": ".cc-master/worktrees/batch-2-5-7-8-9-10-12",
-  "branch": "cc-master/batch-2-5-7-8-9-10-12",
-  "created_at": "2026-03-07T00:00:00Z"
+  "batch_name": "batch-9",
+  "task_ids": [
+    9
+  ],
+  "subtask_ids": [
+    61,
+    62,
+    63,
+    64,
+    65
+  ],
+  "worktree_path": ".cc-master/worktrees/batch-9",
+  "branch": "cc-master/batch-9",
+  "created_at": "2026-04-18T21:05:31Z"
 }
