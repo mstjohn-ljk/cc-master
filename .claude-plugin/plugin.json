@@ -1,12 +1,20 @@
 {
   "name": "cc-master",
   "description": "Autonomous project management for Claude Code: roadmap generation, kanban task tracking, codebase insights, implementation, and QA validation — all TUI/CLI-native",
-  "version": "0.20.0",
+  "version": "0.21.0-dev",
   "author": {
     "name": "mstjohn-ljk"
   },
   "repository": "https://github.com/mstjohn-ljk/cc-master",
   "homepage": "https://github.com/mstjohn-ljk/cc-master",
   "license": "MIT",
+  "dependencies": {
+    "kuzu": {
+      "version": "0.11.2",
+      "interface": "python3",
+      "optional": true,
+      "purpose": "Embedded graph database backing cc-master v2 graph engine"
+    }
+  },
   "keywords": ["roadmap", "kanban", "insights", "qa", "project-management", "skills", "pipeline", "competitor-analysis", "ui-testing", "e2e"]
 }
