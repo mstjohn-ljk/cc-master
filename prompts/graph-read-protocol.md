@@ -8,7 +8,7 @@ The graph is a derived index over the JSON and markdown artifacts in `.cc-master
 
 Every graph-backed skill MUST execute these three checks, in this order, before trusting any Cypher result.
 
-1. **Check 1 — Directory exists and is readable.** Before any Cypher query, verify `.cc-master/graph.kuzu/` exists as a directory and the process can read it. On failure → fall back to JSON read.
+1. **Check 1 — Graph path exists and is readable.** Before any Cypher query, verify `.cc-master/graph.kuzu` exists on disk as a file or directory (Kuzu's on-disk representation varies by version) and the process can read it. On failure → fall back to JSON read.
 
 2. **Check 2 — Source hashes match.** For every JSON/markdown artifact the query depends on (`kanban.json`, `roadmap.json`, `discovery.json`, relevant `specs/*.md`), compute the file's current canonical hash and compare against `_source.content_hash`. On any mismatch → fall back to JSON read for that artifact.
 
@@ -20,7 +20,7 @@ A skill that passes Check 1 and 2 but fails Check 3 MUST NOT retry the query aga
 
 The following failure conditions are the full enumerated set of pre-query failures a read-side skill can encounter. Each maps to exactly one fallback action.
 
-- `.cc-master/graph.kuzu/` directory absent — Fallback action: read the dependent JSON artifact(s) directly and compute the result in memory.
+- `.cc-master/graph.kuzu` path absent (neither file nor directory) — Fallback action: read the dependent JSON artifact(s) directly and compute the result in memory.
 - `_source` content hash mismatch for a dependent file — Fallback action: read that specific JSON/markdown artifact directly and compute the result from the live file, not the graph.
 - Cypher parse error (kuzu_client exit code 4) — Fallback action: surface the Cypher text in a one-line diagnostic and fall back to JSON read; do not silently discard the error.
 - Kuzu Python binding not installed (kuzu_client exit code 2) — Fallback action: print a one-line "graph binding missing — falling back to JSON" warning and read JSON for the remainder of the session.
@@ -97,3 +97,23 @@ These invariants are repeated here because every graph-backed skill will read th
 - Every fallback path MUST return the same semantic result as the graph query — just slower. If the JSON fallback returns different data than the graph query would have, the fallback is wrong and the skill is broken. Test fallback paths against the graph-backed path for equivalence before shipping.
 
 When any of these invariants conflict with a performance target or a user-visible wait, the invariant wins. Graph speed is an optimization; correctness is a contract.
+
+## Citation Pattern
+
+Every graph-backed cc-master skill MUST paste the following block verbatim into its `## Process` section at the first step that consumes `.cc-master/graph.kuzu/`. The block cites this contract, restates the three pre-query checks, states the one-warning-per-session rule, and carries the verbatim JSON-fallback fragment downstream. Pasting the block is how the contract propagates — a skill that paraphrases the block is not citing the contract, it is inventing its own.
+
+```
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
+The citation line is the single-line summary an operator or reviewer sees first; the three check restatements make the contract auditable inside the skill itself; the one-warning rule prevents terminal spam; the JSON-fallback fragment (copied verbatim from `## JSON Fallback Template`) is the exact behavior downstream consumers depend on. All four elements MUST appear together — a partial paste is a contract violation.

@@ -62,6 +62,8 @@ The v1 graph defines exactly six node types: `Task`, `Subtask`, `Spec`, `Feature
 | created_at | TIMESTAMP | no | ISO-8601 from `kanban.json` |
 | updated_at | TIMESTAMP | no | ISO-8601 from `kanban.json` |
 | source_file | STRING | no | Always `.cc-master/kanban.json` for v1 |
+| competitor_insight_ids | STRING[] | no | Array of competitor insight ids from `metadata.competitor_insight_ids` (default `[]`). Drives the `[C]` competitor-informed badge in the kanban board render. |
+| phase | STRING | no | Free-form phase stamp from `metadata.phase` such as `"qa"` (default `""` — empty string, not NULL). Drives the Review column classification (`status = in_progress AND phase = "qa"`) in the kanban board render. |
 
 **Primary key:** `id`
 
@@ -89,6 +91,8 @@ The v1 graph defines exactly six node types: `Task`, `Subtask`, `Spec`, `Feature
 | created_at | TIMESTAMP | no | ISO-8601 from `kanban.json` |
 | updated_at | TIMESTAMP | no | ISO-8601 from `kanban.json` |
 | source_file | STRING | no | Always `.cc-master/kanban.json` for v1 |
+| competitor_insight_ids | STRING[] | no | Array of competitor insight ids from `metadata.competitor_insight_ids` (default `[]`). Drives the `[C]` competitor-informed badge in the kanban board render. |
+| phase | STRING | no | Free-form phase stamp from `metadata.phase` such as `"qa"` (default `""` — empty string, not NULL). Drives the Review column classification (`status = in_progress AND phase = "qa"`) in the kanban board render. |
 
 **Primary key:** `id`
 

@@ -30,9 +30,94 @@ No tasks found. Use /cc-master:kanban-add to create tasks.
 
 And stop.
 
+### Step 1b: Pre-Query Checks
+
+This skill is graph-backed with a strict JSON fallback. Paste the following contract block verbatim before executing any Cypher query — the text is the required citation of `prompts/graph-read-protocol.md` and propagates the three pre-query checks, the one-warning-per-session rule, and the JSON-fallback fragment downstream.
+
+```
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu/` exists as a readable directory.
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
+Execute the checks in order:
+
+1. **Check 1 — Graph path exists and is readable.** Test that `.cc-master/graph.kuzu` exists and is readable (Kuzu may store the DB as a directory or a single file depending on version — `test -e` works for both, e.g. `test -e .cc-master/graph.kuzu`). If absent or unreadable → set `render_source = "JSON fallback"`, emit the one-warning line `Graph absent/stale — falling back to JSON read for kanban.json` if not already emitted this session, skip directly to Step 2 using the `tasks[]` array from Step 1's JSON read.
+
+2. **Check 2 — Source hash matches.** Run the `_source` lookup via the Kuzu client:
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
+   ```
+
+   Compute the on-disk canonical-JSON hash of `.cc-master/kanban.json` using the JSON-artifact algorithm specified in `prompts/graph-read-protocol.md` (`## Hash Comparison Rule`):
+
+   ```
+   python3 -c "import json,hashlib,sys; o=json.load(open(sys.argv[1])); print(hashlib.sha256(json.dumps(o,sort_keys=True,separators=(',',':')).encode()).hexdigest())" .cc-master/kanban.json
+   ```
+
+   If no `_source` row is returned, or the stored hash differs from the current on-disk hash → set `render_source = "JSON fallback"`, emit the one-warning line if not already emitted, skip to Step 2 using the JSON `tasks[]` array.
+
+3. **Check 3 — Query executes cleanly.** Guard every Cypher shell-out in Step 1c with exit-code inspection. If `kuzu_client.py query` exits non-zero (codes 2, 3, 4, or any other) or writes to stderr → set `render_source = "JSON fallback"`, emit the one-warning line if not already emitted, abandon the graph rowset, and fall through to Step 2 using the JSON `tasks[]` array.
+
+Once fallback has been taken for this invocation, do NOT retry the graph query for any later step. The protocol forbids retry. Continue through Steps 2–5 using the JSON data.
+
+If all three checks pass, set `render_source = "graph"` and proceed to Step 1c.
+
+### Step 1c: Graph Query
+
+With `render_source = "graph"`, shell out to `scripts/graph/kuzu_client.py query` against `.cc-master/graph.kuzu/` to fetch the task and subtask rowsets. Each invocation runs one Cypher statement and returns JSON rows on stdout.
+
+**Query A — Tasks:**
+
+```
+python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) RETURN t.id AS id, t.subject AS subject, t.status AS status, t.priority AS priority, t.source AS source, t.owner AS owner, t.competitor_insight_ids AS competitor_insight_ids, t.phase AS phase"
+```
+
+**Query B — Subtasks:**
+
+```
+python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Subtask) RETURN s.id AS id, s.parent_id AS parent_id, s.subject AS subject, s.status AS status, s.blocked_by AS blocked_by, s.wave AS wave"
+```
+
+Inspect each invocation's exit code. On exit code 4 (Cypher parse/runtime error), or exit codes 2 or 3, or any non-zero exit, or non-empty stderr → this is Check 3 failing mid-query: set `render_source = "JSON fallback"`, emit the one-warning line `Graph absent/stale — falling back to JSON read for kanban.json` if not already emitted this session, discard any partial rowset, and fall through to Step 2 using the JSON `tasks[]` array.
+
+Query B's `blocked_by` array is the authoritative source of blocked-status markers for Subtasks; Task-level blocked relations come from `Task.blocked_by` in Query A if extended, otherwise from Query B for subtasks — no separate `BLOCKED_BY` edge traversal is needed for the board render at v1 scope.
+
+Merge Queries A and B into a unified list matching the shape the existing render logic already consumes:
+
+```
+{
+  id,
+  subject,
+  status,
+  owner,
+  description: "",
+  blocked_by,
+  metadata: {
+    source,
+    priority,
+    parent_id,
+    wave,
+    phase,
+    competitor_insight_ids,
+  }
+}
+```
+
+Task rows from Query A have `parent_id = null`; Subtask rows from Query B have their parent id populated — this is how downstream classification and subtask-rollup logic already distinguishes parents from children. Populate `description` as an empty string at this stage; it is only needed for `--detail` view and is merged in during Step 4.
+
 ### Step 2: Classify Tasks Into Columns
 
-Map each task into one of four columns based on status and metadata:
+Map each task (from the graph rowset produced by Step 1c OR the JSON fallback `tasks[]` list — both are normalized into the same shape before this step runs) into one of four columns based on status and metadata:
 
 | Column | Condition |
 |--------|-----------|
@@ -45,10 +130,10 @@ Tasks with `blocked_by` that are still pending go into **Backlog** but are marke
 
 ### Step 3: Read Metadata
 
-Each task in kanban.json already contains all needed fields:
+Each task (from the graph rowset produced by Step 1c OR the JSON fallback `tasks[]` list) already carries the fields the render needs — in graph mode they come from Task/Subtask node properties, in JSON mode they come from the `task` record and its `metadata` subobject. After the Step 1c normalization, both sources expose the same shape to this step. Required fields:
 - `subject` — the display title (truncate to column width)
 - `owner` — show as `@owner-name` if assigned
-- `description` — human-readable text (no metadata parsing needed)
+- `description` — human-readable text. Populated directly in JSON-fallback mode; populated via the hybrid JSON merge described in Step 4's Detail View when running in graph mode. Empty string at Step 3 for default/compact/filter views in graph mode — these views never render `description` and do not need it.
 - `blocked_by` — array of blocking task IDs; mark blocked tasks with a lock indicator
 - `metadata.source` — for source badge display
 - `metadata.priority` — for priority prefix display
@@ -126,6 +211,18 @@ After the board, print a one-line summary:
 Total: <n> tasks | <backlog> backlog | <active> active | <review> review | <done> done
 ```
 
+On the next line, print a render-source indicator reflecting the value of `render_source` set in Steps 1b/1c. Exactly one of:
+
+```
+Rendered from: graph
+```
+
+or:
+
+```
+Rendered from: JSON fallback
+```
+
 If arguments were provided, print next-action hints:
 
 ```
@@ -142,6 +239,8 @@ The skill may be invoked with arguments. Parse them from the ARGUMENTS string:
 - **`--filter backlog|progress|review|done`** — show only one column
 
 ### Detail View (`--detail`)
+
+**Hybrid data-source model for `--detail`:** when the render source is `graph`, the detail view runs a hybrid merge — Query A and Query B from Step 1c supply the task list, statuses, priorities, sources, owners, phases, and `competitor_insight_ids`; `.cc-master/kanban.json` is then read ONCE and its `tasks[]` array is keyed by `id` to merge in `description` text (and, for competitor-informed tasks, the `Market Evidence` block parsed out of the description). This is NOT a fallback — descriptions are intentionally not stored in the v1 graph schema — so the one-warning-per-session line is NOT emitted for this case. The `render_source` value stays `graph`. If the render source is already `JSON fallback`, the description is already present on each task record and no second read is required.
 
 When `--detail` is passed, render as a grouped list with full descriptions:
 
@@ -227,3 +326,4 @@ Kanban: 3 backlog | 2 active | 1 review | 4 done (10 total)
 - Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — read exclusively from `.cc-master/kanban.json`
 - Do not suggest actions unless printing the hint line
 - Do not render more than 20 tasks per column — truncate with "+ N more" if exceeded
+- Do not write to the graph — this skill is read-only. Only `cc-master:index` writes to the graph.

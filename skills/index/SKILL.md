@@ -40,6 +40,8 @@ These rules apply to ALL argument parsing and filesystem handling across this sk
 
 ## Process
 
+Write-side companion to the read-side contract at prompts/graph-read-protocol.md — every hash algorithm and _source schema change here MUST be mirrored there.
+
 The skill runs in six sequential steps (Steps 1–6 below). The `## Parsers` and `## Content Hashing` sections define reusable utilities that Steps 4, 5, and the `## --touch Single-File Refresh` section invoke. Argument parsing happens in Step 1; Steps 2–3 boot the Kuzu binding and the graph schema; Step 4 sweeps absent files out of the graph; Step 5 upserts the file set (or a narrowed subset if `--module` was given); Step 6 prints the summary and closes the database. When `--touch <file>` is set, Steps 4 and 5 are skipped and control passes to the `## --touch Single-File Refresh` section immediately after Step 3.
 
 ## Parsers
@@ -86,6 +88,8 @@ Two cross-parser rules apply everywhere below:
      - `created_at` ← `t.created_at` (ISO-8601 string; Step 5 handles TIMESTAMP binding)
      - `updated_at` ← `t.updated_at`
      - `source_file` ← the literal string `.cc-master/kanban.json`
+     - `competitor_insight_ids` ← `t.metadata.competitor_insight_ids` if present, else `[]` (empty array, **NOT null** — Kuzu's `STRING[]` column binds cleanly to an empty list but rejects a `null` list)
+     - `phase` ← `t.metadata.phase` if present, else `""` (empty string, **NOT null** — Kuzu's STRING column handling is more reliable with empty-string defaults than NULL, and every downstream consumer compares on equality with a stringy phase name)
    - Else (parent_id is a number) → emit a **Subtask** node with properties:
      - `id` ← `t.id`
      - `parent_id` ← `t.metadata.parent_id`
@@ -97,6 +101,8 @@ Two cross-parser rules apply everywhere below:
      - `created_at` ← `t.created_at`
      - `updated_at` ← `t.updated_at`
      - `source_file` ← `.cc-master/kanban.json`
+     - `competitor_insight_ids` ← `t.metadata.competitor_insight_ids` if present, else `[]` (same default and rationale as Task)
+     - `phase` ← `t.metadata.phase` if present, else `""` (same default and rationale as Task)
 4. After the node pass, derive edges:
    - **HAS_SUBTASK**: for each Subtask node `s`, emit `{from: {type: "Task", key: s.parent_id}, to: {type: "Subtask", key: s.id}}`. If no Task with `id == s.parent_id` exists in this bundle, drop the edge silently (the cross-parser no-dangling-edges rule).
    - **BLOCKED_BY**: for each Task or Subtask `t` with a non-empty `blocked_by` array, for each id `b` in that array, emit an edge from `t` to whichever node (Task or Subtask) has primary key `b`. Resolution precedence: if the id appears as both a Task and a Subtask id (it will not under the current schema, but guard the ambiguity), prefer Task. Drop silently if `b` resolves to neither.
@@ -411,8 +417,8 @@ python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<statement>"
 
 Every statement uses `IF NOT EXISTS`, making the step fully idempotent — re-running the skill on an already-bootstrapped graph is a no-op at the schema layer.
 
-1. `CREATE NODE TABLE IF NOT EXISTS Task(id INT64, subject STRING, status STRING, priority STRING, source STRING, owner STRING, created_at TIMESTAMP, updated_at TIMESTAMP, source_file STRING, PRIMARY KEY (id))`
-2. `CREATE NODE TABLE IF NOT EXISTS Subtask(id INT64, parent_id INT64, subject STRING, status STRING, blocked_by INT64[], spec_file STRING, wave INT64, created_at TIMESTAMP, updated_at TIMESTAMP, source_file STRING, PRIMARY KEY (id))`
+1. `CREATE NODE TABLE IF NOT EXISTS Task(id INT64, subject STRING, status STRING, priority STRING, source STRING, owner STRING, created_at TIMESTAMP, updated_at TIMESTAMP, source_file STRING, competitor_insight_ids STRING[], phase STRING, PRIMARY KEY (id))`
+2. `CREATE NODE TABLE IF NOT EXISTS Subtask(id INT64, parent_id INT64, subject STRING, status STRING, blocked_by INT64[], spec_file STRING, wave INT64, created_at TIMESTAMP, updated_at TIMESTAMP, source_file STRING, competitor_insight_ids STRING[], phase STRING, PRIMARY KEY (id))`
 3. `CREATE NODE TABLE IF NOT EXISTS Spec(task_id INT64, file_path STRING, has_production_readiness BOOLEAN, has_verified_contracts BOOLEAN, touches_modules STRING[], updated_at TIMESTAMP, source_file STRING, PRIMARY KEY (task_id))`
 4. `CREATE NODE TABLE IF NOT EXISTS Feature(id STRING, title STRING, priority STRING, status STRING, phase STRING, complexity STRING, impact STRING, delivered_at TIMESTAMP, source_file STRING, PRIMARY KEY (id))`
 5. `CREATE NODE TABLE IF NOT EXISTS Module(name STRING, path STRING, language STRING, file_count INT64, source_file STRING, PRIMARY KEY (name))`
@@ -428,6 +434,61 @@ Every statement uses `IF NOT EXISTS`, making the step fully idempotent — re-ru
 Statements 1-6 define the six v1 node tables (Task, Subtask, Spec, Feature, Module, File). Statements 7-12 define the six v1 edge tables. Statement 13 provisions the `_source` metadata table — the hash-diff bookkeeping surface that Step 4 (absence handling) and Step 5 (hash-compare skip and `_source` upsert) use to decide whether a source artifact has changed since the last index pass.
 
 On any non-zero exit from a `kuzu_client.py query` call, follow the contract table above. The offending statement is the one currently being executed — include it in the error output so the user (or the next skill iteration) can see exactly which DDL failed.
+
+**Step 3.2a — Schema drift detection and in-place ALTER migration.**
+
+`CREATE NODE TABLE IF NOT EXISTS` is idempotent by table *name* only — if a table was created by an older version of this skill that did not yet know about a newer column (e.g., a graph built before the `competitor_insight_ids` and `phase` columns were added to Task/Subtask), `IF NOT EXISTS` returns "already exists" and the older table definition is kept. The table therefore survives the upgrade with a stale column list, and Step 5.3 Phase B's CREATE with the new parameter set fails at runtime with a Kuzu property-not-found error.
+
+This substep detects that drift and heals it in place using Kuzu's `ALTER TABLE … ADD <col> <type>` DDL. The ALTER path was verified against `kuzu==0.11.2` on 2026-04-18 with the following reproduction (captured verbatim for the record):
+
+```
+$ python3 scripts/graph/kuzu_client.py init /tmp/kuzu-alter-test-72732
+{"status": "ok", "db_path": "/private/tmp/kuzu-alter-test-72732", "kuzu_version": "0.11.2"}
+$ python3 scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "CREATE NODE TABLE TestNode(id INT64, PRIMARY KEY (id))"
+[{"result": "Table TestNode has been created."}]
+$ python3 scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "ALTER TABLE TestNode ADD foo STRING"
+[{"result": "Property foo added to table TestNode."}]   # exit 0
+$ python3 scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "MATCH (n:TestNode) RETURN n.foo AS foo"
+[]                                                      # exit 0 — column readable, zero rows as expected
+```
+
+Because ALTER is supported, the skill uses an additive in-place migration — no full rebuild is forced on the user when a new column is introduced.
+
+Run this substep AFTER every `CREATE NODE TABLE IF NOT EXISTS` in Step 3.2 has executed. For each `(table, column, kuzu_type)` tuple in the **Expected columns** list below:
+
+1. Probe the column with a read query:
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "MATCH (n:<Table>) RETURN n.<column> LIMIT 1"
+   ```
+
+2. Interpret the result:
+   - **Exit 0 (any row count, including zero rows):** the column exists. Move to the next tuple.
+   - **Exit 4 with an error message matching "property … not found" / "no such property" (Kuzu phrasings vary by version; a substring search for `"not found"` or `"does not exist"` is the robust match):** the column is missing. Issue:
+
+     ```
+     python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+       "ALTER TABLE <Table> ADD <column> <kuzu_type>"
+     ```
+
+     Expect exit 0 and `[{"result": "Property <column> added to table <Table>."}]`. Log `"Schema migrated in place: added <Table>.<column> (<kuzu_type>)"` and continue.
+   - **Exit 4 with any other error message, or any other non-zero exit:** this is not a drift situation — something else is wrong. Print the stderr JSON verbatim, prefixed with `"Schema drift probe failed for <Table>.<column>: "`, and exit non-zero. Do NOT attempt an ALTER on an ambiguous failure; the full-rebuild escape hatch (`rm -rf .cc-master/graph.kuzu/ && cc-master:index --full`) is always available to the user as a last resort and is safer than blindly mutating the schema.
+
+**Expected columns** (tables + columns introduced in versions later than v0.21.0's minimum; probed and ALTER-patched if absent):
+
+| Table | Column | Kuzu type | Introduced in |
+|-------|--------|-----------|---------------|
+| Task | competitor_insight_ids | STRING[] | v0.21.0 (kanban integration wave) |
+| Task | phase | STRING | v0.21.0 (kanban integration wave) |
+| Subtask | competitor_insight_ids | STRING[] | v0.21.0 (kanban integration wave) |
+| Subtask | phase | STRING | v0.21.0 (kanban integration wave) |
+
+When this table grows in future waves (new columns added to other node types), append new rows here; the probe loop is column-list-driven so the migration code itself does not need to change.
+
+**Back-fill note.** `ALTER TABLE … ADD <col>` in Kuzu 0.11.2 initializes the new column on every existing row to the column's empty/null equivalent (empty list for `STRING[]`, empty string for non-nullable `STRING` when one is set as the column default, NULL otherwise). Step 5 overwrites these values on the next full-replace pass — because the per-file full-replace invariant DELETEs and re-INSERTs every Task / Subtask row whenever `kanban.json` is re-indexed, no dedicated back-fill query is needed. The first re-index pass after the ALTER writes the correct `competitor_insight_ids` and `phase` values end-to-end.
+
+**Rebuild fallback.** If a future Kuzu upgrade drops ALTER support, or if a column needs to change type (not just be added), the skill's fallback is the well-documented full-rebuild path: the user runs `rm -rf .cc-master/graph.kuzu/ && /cc-master:index --full`, which rebuilds the graph from the JSON source of truth. The graph rebuilt from JSON is always valid — the graph is a derived index, not a primary store — so the rebuild never loses data. This substep's probe-and-ALTER logic is strictly an optimization over that always-available escape hatch; a regression in Kuzu's ALTER support is therefore a UX issue, not a correctness issue.
 
 **Step 3.3 — Smoke-check the connection.**
 
@@ -660,8 +721,8 @@ python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
 
 Concrete examples, one per v1 node type:
 
-- Task: `CREATE (n:Task {id: $id, subject: $subject, status: $status, priority: $priority, source: $source, owner: $owner, created_at: $created_at, updated_at: $updated_at, source_file: $source_file})`
-- Subtask: `CREATE (n:Subtask {id: $id, parent_id: $parent_id, subject: $subject, status: $status, blocked_by: $blocked_by, spec_file: $spec_file, wave: $wave, created_at: $created_at, updated_at: $updated_at, source_file: $source_file})` — `blocked_by` is an `INT64[]`; pass it as a native JSON array in `--params-json` (e.g. `"blocked_by": [3, 7]`). Kuzu's Python binding maps JSON arrays to list-typed columns.
+- Task: `CREATE (n:Task {id: $id, subject: $subject, status: $status, priority: $priority, source: $source, owner: $owner, created_at: $created_at, updated_at: $updated_at, source_file: $source_file, competitor_insight_ids: $competitor_insight_ids, phase: $phase})` — `competitor_insight_ids` is a `STRING[]`; pass as a native JSON array (e.g. `"competitor_insight_ids": ["ins-12", "ins-47"]`, or `[]` when the task was not sourced from a competitor insight). `phase` is a plain STRING defaulting to `""` when the task has no phase stamp.
+- Subtask: `CREATE (n:Subtask {id: $id, parent_id: $parent_id, subject: $subject, status: $status, blocked_by: $blocked_by, spec_file: $spec_file, wave: $wave, created_at: $created_at, updated_at: $updated_at, source_file: $source_file, competitor_insight_ids: $competitor_insight_ids, phase: $phase})` — `blocked_by` and `competitor_insight_ids` are both list-typed (`INT64[]` and `STRING[]`); pass each as a native JSON array in `--params-json` (e.g. `"blocked_by": [3, 7]`, `"competitor_insight_ids": []`). Kuzu's Python binding maps JSON arrays to list-typed columns. `phase` is a plain STRING defaulting to `""`.
 - Spec: `CREATE (n:Spec {task_id: $task_id, file_path: $file_path, has_production_readiness: $has_production_readiness, has_verified_contracts: $has_verified_contracts, touches_modules: $touches_modules, updated_at: $updated_at, source_file: $source_file})` — `touches_modules` is `STRING[]`, pass as JSON array.
 - Feature: `CREATE (n:Feature {id: $id, title: $title, priority: $priority, status: $status, phase: $phase, complexity: $complexity, impact: $impact, delivered_at: $delivered_at, source_file: $source_file})`
 - Module: `CREATE (n:Module {name: $name, path: $path, language: $language, file_count: $file_count, source_file: $source_file})`
