@@ -1,0 +1,29 @@
+# Java patterns for the cc-master code-graph walker.
+
+class:
+  - pattern: "class $NAME { $$$BODY }"
+  - pattern: "public class $NAME { $$$BODY }"
+  - pattern: "public class $NAME extends $$$BASE { $$$BODY }"
+  - pattern: "public class $NAME implements $$$BASE { $$$BODY }"
+
+interface:
+  - pattern: "interface $NAME { $$$BODY }"
+  - pattern: "public interface $NAME { $$$BODY }"
+
+enum:
+  - pattern: "enum $NAME { $$$BODY }"
+  - pattern: "public enum $NAME { $$$BODY }"
+
+method:
+  # Heuristic — dynamic dispatch resolution is out of scope (subtask 77).
+  - pattern: "public $RET $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "private $RET $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "protected $RET $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "public static $RET $NAME($$$ARGS) { $$$BODY }"
+
+import:
+  - pattern: "import $$$NAME;"
+  - pattern: "import static $$$NAME;"
+
+call:
+  - pattern: "$NAME($$$ARGS)"

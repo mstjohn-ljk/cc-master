@@ -116,6 +116,152 @@ Scan all changed source code files (excluding test files and non-source files) f
 - Hardcoded test values in non-test code: HIGH (breaks in production)
 - Commented-out real logic: MEDIUM (suggests unfinished migration)
 
+### Step 5b: Authorization Check
+
+This step closes a gap in prior qa-review iterations: there was no systematic verification that build agents respected the spec's declared "Files to Modify" / "Files to Create" scope. Agents could silently edit files outside the authorized set and previous reviews would not flag it. Step 5b closes that gap by running Query 6 from the graph engine design doc (`docs/plans/2026-04-graph-engine-v1.md` lines 670–701) to derive the authorization set, then comparing it against `git diff --name-only` on the worktree. Out-of-scope edits become structured findings with precise severity.
+
+**Input:**
+- Task id (from Step 1).
+- Spec path `.cc-master/specs/<task-id>.md` (already read in Step 1).
+- Worktree path (derived in Step 1 from git state).
+
+**If no worktree is available:** print `"Authorization check skipped — no worktree resolved in Step 1."`, record `{"status": "no-diff-available"}` in the review output, and contribute zero findings. The rest of the review proceeds normally.
+
+**Compute the "files changed" set:**
+
+Run via the `Bash` tool:
+
+```
+cd <worktree-path> && git diff --name-only <base-branch>..HEAD
+```
+
+`<base-branch>` resolution: use the base branch already resolved in Step 1 (derived from git state — do not invent a new resolver). Fallback chain if Step 1 did not resolve a base branch: try `main`, then `master`, verifying each with `git rev-parse --verify <name>` before use. If neither verifies, record `{"status": "no-diff-available"}`, contribute zero findings, and skip the rest of Step 5b.
+
+Parse the newline-separated `git diff --name-only` output into a set of relative paths. Validate each path against the safe-path regex `^[A-Za-z0-9._/-]+$`, with no `..` segments and no leading `/`. Malformed paths produce ONE finding per malformed path with:
+
+- `category: "authorization-malformed"`
+- `severity: "MEDIUM"`
+- `file`: the truncated path (truncate to 60 characters)
+- `description`: `"path from git diff failed safety validation — skipped: <truncated-path>"`
+
+Malformed paths MUST NOT enter the authorization comparison — they are skipped from the set.
+
+**Compute the authorization set — graph-backed path:**
+
+Before running any Cypher, cite the graph-read-protocol contract verbatim. The following 12-line citation block is copied verbatim from `prompts/graph-read-protocol.md` ("Citation Pattern" section) and MUST appear unmodified:
+
+```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
+Execute the three pre-query checks in order:
+
+- **Check 1 — graph directory exists.** Verify `.cc-master/graph.kuzu` exists on disk (file or directory) and is readable. On failure → emit the standard one-warning-per-session line `"Graph absent/stale — falling back to JSON read for kanban.json"` (if not already emitted this session) and fall through to the JSON-fallback path.
+- **Check 2 — `_source.content_hash` matches.** For `.cc-master/kanban.json`, compute the canonical-json SHA-256 (sort_keys, separators=`(",", ":")`, UTF-8 bytes) and compare against the `_source.content_hash` row for `.cc-master/kanban.json`. For the spec markdown file `.cc-master/specs/<task-id>.md`, compute the raw-bytes SHA-256 (no normalization) and compare against the `_source.content_hash` row for that spec path. `_source.file_path` stores the full relative path with the `.cc-master/` prefix — queries MUST use that prefix. On any mismatch → emit the standard warning (once per session) and fall through to JSON-fallback.
+- **Check 3 — query executes cleanly.** Run the Cypher via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. If exit code is non-zero, or stderr is non-empty, emit the standard warning (once per session) and fall through to JSON-fallback. Do NOT retry the graph query in the same session.
+
+Set `mode = "graph"` when all three checks pass; `mode = "json-fallback"` otherwise.
+
+If all three checks pass, run Query 6 VERBATIM from `docs/plans/2026-04-graph-engine-v1.md` lines 678–684:
+
+```cypher
+MATCH (t:Task {id: $task_id})-[:HAS_SPEC]->(s:Spec)-[tc:TOUCHES]->(m:Module)
+MATCH (m)-[:CONTAINS]->(f:File)
+RETURN DISTINCT f.path AS file_path,
+                m.name AS module_name,
+                tc.intent AS intent
+```
+
+Invocation:
+
+```
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<the cypher above>" --params-json '{"task_id": <id>}'
+```
+
+**Parameter-Binding Contract (Security / Correctness):** The `$task_id` parameter MUST be bound via `--params-json` — NEVER string-concatenated or f-string-interpolated into the Cypher text. This matches the invariant stated in `skills/kanban-add/SKILL.md` "Parameter-Binding Contract": `--params-json` binds the value as a parameter at execution time so `$task_id` is always treated as an opaque literal by Kuzu's parser, while concatenation is a query-injection vector analogous to SQL injection. Any implementation that builds the Cypher by concatenating the task id violates this contract and is a CRITICAL review finding.
+
+Parse the stdout rows into the authorization set:
+
+- `authorized_files = {row.file_path for row in rows}`
+- `authorized_modules = {row.module_name for row in rows}`
+
+**Compute the authorization set — JSON-fallback path:**
+
+Set `mode = "json-fallback"`.
+
+Re-use the already-parsed spec markdown file at `.cc-master/specs/<task-id>.md` from Step 1 — do not re-read it. Extract every file path listed under the `### Files to Modify` and `### Files to Create` headings. Strip markdown list markers (`-`, `*`, backticks) and surrounding whitespace to produce clean relative paths.
+
+- `authorized_files = {paths from spec}`
+- `authorized_modules = None` (the JSON-fallback path cannot distinguish module boundaries; classification degrades per the Query 6 fallback contract in the design doc — see lines 700–701).
+
+**Classify each changed file:**
+
+For each path in the files-changed set (after safety validation), apply these rules in order:
+
+1. **Exact path match in `authorized_files`:** no finding (`authorized`).
+2. **Graph mode only — path NOT in `authorized_files` but its module IS in `authorized_modules`:** MEDIUM finding. Description: `"file not listed in spec (module '<module>' is authorized)"`. To determine the file's module in graph mode, issue a second Cypher query with `--params-json` parameter binding:
+
+   ```cypher
+   MATCH (f:File {path: $path})<-[:CONTAINS]-(m:Module) RETURN m.name AS module_name
+   ```
+
+   Invocation:
+
+   ```
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:File {path: \$path})<-[:CONTAINS]-(m:Module) RETURN m.name AS module_name" --params-json '{"path": "<changed-path>"}'
+   ```
+
+   If this query returns no module row (the file is not in the graph yet), treat the file as out-of-scope different-module and apply rule 3 (HIGH). If this per-file Cypher call exits non-zero while the first Query 6 call succeeded, treat the module as unknown and apply rule 3 (HIGH) — do NOT re-run the protocol or downgrade to JSON-fallback.
+
+3. **Graph mode — path NOT in `authorized_files` AND its module NOT in `authorized_modules` (or no module resolved for the file):** HIGH finding. Description: `"module '<module-or-unknown>' not authorized by spec (authorized modules: <comma-separated list from authorized_modules>)"`. Use the literal token `unknown` in place of `<module-or-unknown>` when the per-file module lookup returned no row.
+
+4. **JSON-fallback mode — path NOT in `authorized_files` (modules cannot be resolved in this mode):** MEDIUM finding. Description: `"file not listed in spec (authorization classification degraded — run /cc-master:index --full for precise graph-backed scope)"`.
+
+Every authorization finding has this shape:
+
+- `category: "authorization"`
+- `severity: "HIGH" | "MEDIUM"` (per the rule above)
+- `file`: the out-of-scope path
+- `description`: the exact string from the matching rule above
+- `suggestion`: `"If this change is required for the task, add the file to the spec's ### Files to Modify or ### Files to Create section and re-run qa-review. If the change is out-of-scope, revert it from the worktree."`
+
+The `authorization-malformed` findings (from the safety-validation step earlier) are emitted as a separate category alongside the `authorization` findings.
+
+**Produce the Step 5b output record:**
+
+```json
+{
+  "mode": "graph" | "json-fallback" | "no-diff-available",
+  "authorized_count": <len(authorized_files)>,
+  "changed_count": <len(valid_changed_paths)>,
+  "out_of_scope_count": <number of non-authorized changed paths>,
+  "findings": [ <authorization findings with category, severity, file, description, suggestion> ]
+}
+```
+
+This record is passed to Step 7 (Produce Report) which adds it to the review JSON as a top-level `"authorization"` field. Extending Step 7 to include this output is handled in a separate subtask — do NOT modify Step 7 from within Step 5b.
+
+**Terminal output for Step 5b:** do not print anything from inside Step 5b directly; the data flows into Step 7's consolidated report via the output record above. Step 5b's only in-step print is the standard one-warning-per-session line (`"Graph absent/stale — falling back to JSON read for kanban.json"`) when a pre-query check fails.
+
+**Error handling:**
+
+- `git diff` failure (exit code non-zero, stderr non-empty): record `{"status": "no-diff-available"}` in the output record, contribute zero findings, and skip the rest of Step 5b.
+- Graph query failure during Check 2 or Check 3 for Query 6: fall through to the JSON-fallback path; emit the standard one-warning-per-session line if it has not already been emitted this session.
+- Spec parsing in JSON-fallback mode yields zero authorized paths: record `mode = "json-fallback"` with `authorized_count = 0`. Every changed file becomes a MEDIUM finding per rule 4. This signals the spec was not filled out correctly.
+- Per-file module-lookup Cypher (rule 2) exits non-zero while Query 6 succeeded: treat the module as unknown for that file and classify as HIGH per rule 3. Do not re-enter the graph-read protocol.
+
 ### Step 6: Review — Test Coverage
 
 1. Identify what test files exist for the changed code
@@ -163,6 +309,10 @@ Security: 1 finding
   [HIGH] No rate limiting on login endpoint
          src/routes/auth/login.ts — brute force attack possible
 
+Authorization: 2 out-of-scope file changes (mode: graph)
+  [HIGH] src/services/billing.ts — module 'billing' not authorized by spec (authorized modules: auth, users)
+  [MED]  src/routes/auth/helpers.ts — file not listed in spec (module 'auth' is authorized)
+
 Test Coverage: partial
   [PASS] Registration happy path tested
   [PASS] Login happy path tested
@@ -175,6 +325,29 @@ Score: 72/100
 Status: FAIL
 
 Findings: 1 critical, 2 high, 1 medium, 1 low
+```
+
+**Authorization section rendering modes:**
+
+When `out_of_scope_count > 0`, render the full block with a header line followed by one indented bullet per finding (shown in the example above):
+
+```
+Authorization: <out_of_scope_count> out-of-scope file changes (mode: <mode>)
+  [HIGH] <file> — module '<X>' not authorized by spec (authorized modules: <list>)
+  [MED]  <file> — file not listed in spec (module '<Y>' is authorized)
+  ...
+```
+
+When `out_of_scope_count == 0`, collapse to a single header line with no findings block:
+
+```
+Authorization: 0 out-of-scope file changes (mode: <mode>)
+```
+
+When `mode == "no-diff-available"`, render the same single header line with `mode: no-diff-available` and no findings block — Step 5b produced zero findings because no diff was available to audit:
+
+```
+Authorization: 0 out-of-scope file changes (mode: no-diff-available)
 ```
 
 **JSON report** — written to TWO locations:
@@ -217,6 +390,21 @@ Findings: 1 critical, 2 high, 1 medium, 1 low
       "suggestion": "Use the same ResponseError class as src/routes/users/create.ts"
     }
   ],
+  "authorization": {
+    "mode": "graph",
+    "authorized_count": 5,
+    "changed_count": 7,
+    "out_of_scope_count": 2,
+    "findings": [
+      {
+        "severity": "high",
+        "category": "authorization",
+        "file": "src/services/billing.ts",
+        "description": "module 'billing' not authorized by spec (authorized modules: auth, users)",
+        "suggestion": "If this change is required for the task, add the file to the spec's ### Files to Modify or ### Files to Create section and re-run qa-review. If the change is out-of-scope, revert it from the worktree."
+      }
+    ]
+  },
   "tests": {
     "command": "npm test",
     "passed": 8,
@@ -226,6 +414,8 @@ Findings: 1 critical, 2 high, 1 medium, 1 low
 }
 ```
 
+The values above are illustrative. The `mode` field is one of `"graph"`, `"json-fallback"`, or `"no-diff-available"` — reflecting whether the Step 5b authorization check ran via the code graph, via the JSON spec fallback, or skipped because no diff was available. The `authorization` field is additive — consumers that ignore unknown fields are unaffected.
+
 **Scoring guide:**
 - Start at 100
 - Each unmet acceptance criterion: -15
@@ -234,10 +424,58 @@ Findings: 1 critical, 2 high, 1 medium, 1 low
 - Each high finding: -10
 - Each medium finding: -5
 - Each low finding: -2
+- Each authorization finding (HIGH): -10
+- Each authorization finding (MEDIUM): -5
 - Missing test coverage for critical path: -5 per gap
 - Floor at 0
 
-**Pass threshold:** Score >= 90 AND zero unmet acceptance criteria AND zero critical/high findings.
+**Pass threshold:** Score >= 90 AND zero unmet acceptance criteria AND zero critical/high findings (including authorization HIGH findings). A single authorization HIGH finding alone is sufficient to fail qa-review because the agent modified files outside the spec's authorization.
+
+### Step 8: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 5b:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
+
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
+```
+
+**qa-review write scope.** This skill writes review report JSON to `.cc-master/specs/<task-id>-review-<N>.json` (NOT a kanban write — does not trigger `--touch`) AND writes review metadata (latest review path, iteration counter, last-pass score) back to the parent task in `.cc-master/kanban.json` (a kanban write — DOES trigger `--touch`). The single coalesced `--touch` fires once after the kanban metadata writeback completes, regardless of how many review JSON files were created during the invocation.
 
 ## What NOT To Do
 
@@ -250,3 +488,4 @@ Findings: 1 critical, 2 high, 1 medium, 1 low
 - Do not accept TODO/FIXME comments, mock data, stub functions, or skeleton implementations as passing — these are always HIGH or CRITICAL findings in non-test code
 - Do not pass an implementation where a paying client would encounter non-functional features, fake data, or placeholder responses
 - Do not use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools — read tasks from kanban.json
+- Do not skip the authorization check when a spec exists — it is the only systematic signal that agents respected the spec's scope.
