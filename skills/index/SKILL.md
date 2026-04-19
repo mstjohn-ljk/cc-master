@@ -422,6 +422,15 @@ On successful argument parsing, proceed to Step 2. Carry `full`, `module`, `code
 
 The Kuzu Python binding is a hard prerequisite for this skill — `cc-master:index` is the only skill that writes to the graph, and it cannot operate without the binding. All other cc-master skills degrade gracefully when the graph is absent; this one refuses to run.
 
+**ABSOLUTE PROHIBITIONS — read before Step 2 execution:**
+
+- **DO NOT create, copy, scaffold, or write `scripts/graph/check_kuzu.sh`, `scripts/graph/kuzu_client.py`, `scripts/graph/run_index.py`, `scripts/graph/ensure-venv.sh`, or any other graph-engine helper into the target project.** These files live ONLY in `${CLAUDE_PLUGIN_ROOT}/scripts/graph/` — the plugin's install directory. The target project MUST NOT gain a `scripts/graph/` directory as a side effect of this skill.
+- **DO NOT write your own Python indexer** even if hand-chaining Cypher calls feels tedious. The skill's process steps are the source of truth; a bespoke reimplementation risks schema drift and is explicitly disallowed.
+- **DO NOT install Kuzu by invoking `pip` or `pip3` directly.** The plugin's SessionStart hook at `${CLAUDE_PLUGIN_ROOT}/scripts/graph/ensure-venv.sh` creates and manages a dedicated venv at `${CLAUDE_PLUGIN_DATA}/venv/`. If `check_kuzu.sh` fails, the correct response is to stop and tell the user to restart their Claude Code session (which re-fires the SessionStart hook).
+- **DO NOT modify `check_kuzu.sh` or `kuzu_client.py` in the plugin install directory.** Those files are part of the plugin and are overwritten on `claude plugin update`.
+
+If any prerequisite is missing, STOP with a clear diagnostic. Never attempt to make prerequisites exist by generating code.
+
 Run the availability check via the Bash tool:
 
 ```
@@ -431,13 +440,21 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/graph/check_kuzu.sh
 Interpret the exit code as follows:
 
 - **Exit 0 (installed):** stdout will be a single line of the form `kuzu 0.11.2`. Record this version string — it is referenced in the Step 6 summary as `kuzu_version`. Proceed to Step 3.
-- **Exit 2 (not installed or python3 missing):** the script's own stderr message already explains the install commands, but the skill must additionally print the following user-facing message and exit with a non-zero status:
+- **Exit 2 (not installed or python3 missing):** the plugin's SessionStart hook should have installed Kuzu to `${CLAUDE_PLUGIN_DATA}/venv/`. If this exit code surfaces at runtime, the hook has not fired in this session. Print the following user-facing message and exit with a non-zero status:
 
   ```
-  Kuzu Python binding is required for cc-master:index. Run: pip install kuzu==0.11.2 (or pipx install kuzu for an isolated environment).
+  Kuzu Python binding is not available. This usually means the cc-master
+  plugin's SessionStart hook has not yet run in this Claude Code session.
+
+  Fix: fully quit Claude Code and relaunch. The hook will run on startup
+  and create a managed Python venv with Kuzu pre-installed at
+  ~/.claude/plugins/data/cc-master-cc-master-marketplace/venv/.
+
+  Do NOT `pip install kuzu` manually into your project. Do NOT scaffold
+  graph-engine scripts into your project. The plugin manages this itself.
   ```
 
-  Do NOT attempt to continue past this point. Do NOT call `kuzu_client.py` — it would only repeat the same failure (exit code 2) and produce a redundant error. The user must install the binding and re-run the skill.
+  Do NOT attempt to continue past this point. Do NOT call `kuzu_client.py` — it would only repeat the same failure (exit code 2) and produce a redundant error. The user must restart their Claude Code session to trigger the SessionStart hook.
 - **Any other exit code:** treat as a bug in `check_kuzu.sh` — print the captured stdout and stderr verbatim so the user can report the failure, then exit non-zero.
 
 ### Step 3: Ensure Graph Exists (Bootstrap DDL)
