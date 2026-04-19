@@ -67,6 +67,51 @@ def _err(msg: str, code: int) -> None:
     sys.exit(code)
 
 
+def _resolve_db_path(raw: str) -> str:
+    """Anchor `.cc-master/...` paths at the MAIN git repo root, not CWD.
+
+    When the CWD is inside a git worktree (e.g. during cc-master:build
+    which operates in .cc-master/worktrees/batch-X-Y/), a relative path
+    like `.cc-master/graph.kuzu` would resolve to a location INSIDE the
+    worktree. The worktree is deleted post-build, taking the graph with
+    it. This function detects worktree context via
+    `git rev-parse --git-common-dir` and rewrites `.cc-master/*` paths
+    to `<main-repo>/.cc-master/*` so the graph lives in the base project.
+
+    Non-.cc-master paths are left alone. Absolute paths are left alone.
+    Paths outside a git repo are left alone.
+    """
+    import os
+    import subprocess
+    if os.path.isabs(raw):
+        return raw
+    # Only rewrite .cc-master/ paths
+    norm = raw.lstrip("./")
+    if not (norm == ".cc-master" or norm.startswith(".cc-master/") or raw.startswith(".cc-master")):
+        return raw
+    try:
+        # --git-common-dir returns the shared git dir (main repo's .git)
+        # whether we're in the main worktree or a linked worktree.
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if not common:
+            return raw
+        # Main repo root is the parent of the common git dir.
+        # For "/path/to/repo/.git" → "/path/to/repo".
+        # For bare repos (".git" = repo root itself) this would break, but
+        # cc-master doesn't operate on bare repos so skip that edge case.
+        if common.endswith("/.git") or common.endswith(os.sep + ".git"):
+            main_root = common[: -len("/.git")]
+        else:
+            main_root = os.path.dirname(common.rstrip("/"))
+        return os.path.join(main_root, raw)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        # Not a git repo, or git unavailable — leave path as-is
+        return raw
+
+
 def _warn(msg: str) -> None:
     """Print a one-line warning to stderr (not JSON — this is out-of-band)."""
     print(f"warning: {msg}", file=sys.stderr)
@@ -107,7 +152,7 @@ def _jsonable(value: Any) -> Any:
 def cmd_init(args: argparse.Namespace) -> None:
     """Create (or open) a Kuzu DB at db_path and ensure _Marker exists."""
     kuzu = _load_kuzu()
-    db_path = Path(args.db_path).resolve()
+    db_path = Path(_resolve_db_path(args.db_path)).resolve()
     # Ensure parent exists. Kuzu will create db_path itself as a directory.
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = kuzu.Database(str(db_path))
@@ -131,7 +176,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 def cmd_query(args: argparse.Namespace) -> None:
     """Execute a Cypher query against an existing Kuzu DB and emit JSON rows."""
     kuzu = _load_kuzu()
-    db_path = Path(args.db_path).resolve()
+    db_path = Path(_resolve_db_path(args.db_path)).resolve()
     if not db_path.exists():
         _err(f"database not found at {db_path}", 3)
 
@@ -181,7 +226,7 @@ def cmd_query(args: argparse.Namespace) -> None:
 def cmd_close(args: argparse.Namespace) -> None:
     """Open and immediately release a DB to force flush and drop locks."""
     kuzu = _load_kuzu()
-    db_path = Path(args.db_path).resolve()
+    db_path = Path(_resolve_db_path(args.db_path)).resolve()
     if not db_path.exists():
         _err(f"database not found at {db_path}", 3)
     # Construct and drop references — Kuzu releases OS locks on GC. Keep
