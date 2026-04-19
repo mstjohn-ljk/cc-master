@@ -1,0 +1,42 @@
+# TypeScript patterns for the cc-master code-graph walker.
+# Shared with JavaScript / JSX / TSX (the dispatcher maps .js/.jsx/.mjs/.cjs
+# to this file per AC #10, and invokes ast-grep with --lang js, ts, or tsx
+# as appropriate for the file extension).
+
+function:
+  - pattern: "function $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "export function $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "export default function $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "const $NAME = ($$$ARGS) => $$$BODY"
+  - pattern: "export const $NAME = ($$$ARGS) => $$$BODY"
+
+class:
+  - pattern: "class $NAME { $$$BODY }"
+  - pattern: "export class $NAME { $$$BODY }"
+  - pattern: "class $NAME extends $$$BASE { $$$BODY }"
+  - pattern: "export class $NAME extends $$$BASE { $$$BODY }"
+
+interface:
+  - pattern: "interface $NAME { $$$BODY }"
+  - pattern: "export interface $NAME { $$$BODY }"
+
+type:
+  - pattern: "type $NAME = $$$RHS"
+  - pattern: "export type $NAME = $$$RHS"
+
+enum:
+  - pattern: "enum $NAME { $$$BODY }"
+  - pattern: "export enum $NAME { $$$BODY }"
+
+method:
+  # Heuristic — dispatch resolution is out of scope for v1 (subtask 77).
+  # ast-grep's class-scoped match only catches the first method per class.
+  - pattern: "class $$$ { $NAME($$$ARGS) { $$$BODY } }"
+
+import:
+  - pattern: "import { $$$NAMES } from $SRC"
+  - pattern: "import * as $NAME from $SRC"
+  - pattern: "const $NAME = require($SRC)"
+
+call:
+  - pattern: "$NAME($$$ARGS)"

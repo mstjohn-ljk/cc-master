@@ -33,7 +33,7 @@ These are the numbers v1 must meet. They are not aspirations — they are the ac
 
 | Operation | Target | Measurement conditions | If exceeded |
 |-----------|--------|------------------------|-------------|
-| Cold full index | ≤30s | 500-task `kanban.json`, 50-spec `specs/` directory, 10k-file codebase, `ast-grep` available on PATH | Split indexing per-module and reconsider the bulk-insert strategy (COPY FROM vs. MERGE batches) |
+| Cold full index | ≤30s aspirational, ≤60s hard gate | 500-task `kanban.json`, 50-spec `specs/` directory, 10k-file codebase, `ast-grep` available on PATH; Wave 7 impact queries depend on this | Stop — optimize before Wave 7. Split indexing per-module, reconsider the bulk-insert strategy (COPY FROM vs. MERGE batches), and re-measure via `scripts/graph/measure_code_graph_index.sh` (exits 3 on >60s miss) |
 | `--touch kanban.json` re-index | ≤200ms | Single `kanban.json` write from a post-write skill (e.g. `kanban-add`, `build`, `complete`) | Skip synchronous re-index and fall back to async/batched indexing on a debounce timer |
 | Board-render query | ≤50ms | 500 tasks, cold Kuzu query cache, all columns rendered | Add a composite index on `Task.status` and `Task.priority`; re-measure before accepting |
 | 2-hop impact query | ≤200ms | Start from a single `Symbol` node on a 10k-file codebase, traverse two hops of `REFERENCES`/`DEFINED_IN` edges | Cap traversal depth, paginate results, and require callers to request additional pages explicitly |
@@ -43,7 +43,7 @@ The envelope is fixed for v1. If production usage surfaces a workload these numb
 
 ## Node schema
 
-The v1 graph defines exactly six node types: `Task`, `Subtask`, `Spec`, `Feature`, `Module`, and `File`. Each node is derived from a specific JSON artifact or filesystem scan, carries a `source_file` property so the per-file full-replace invariant can locate every derived node in a single query, and follows the same DELETE-then-INSERT lifecycle on upstream change. Types are Kuzu native types: `STRING`, `INT64`, `BOOLEAN`, `TIMESTAMP`, and `STRING[]` / `INT64[]` for arrays.
+The v1 graph defines seven node types: `Task`, `Subtask`, `Spec`, `Feature`, `Module`, `File`, and `Symbol`. Each node is derived from a specific JSON artifact or filesystem scan, carries a `source_file` property so the per-file full-replace invariant can locate every derived node in a single query, and follows the same DELETE-then-INSERT lifecycle on upstream change. Types are Kuzu native types: `STRING`, `INT64`, `BOOLEAN`, `TIMESTAMP`, and `STRING[]` / `INT64[]` for arrays.
 
 ### Task
 
@@ -187,7 +187,7 @@ The v1 graph defines exactly six node types: `Task`, `Subtask`, `Spec`, `Feature
 | language | STRING | yes | Inferred from file extension |
 | content_hash | STRING | no | SHA-256 of file content at index time |
 | size | INT64 | yes | Byte size at index time |
-| is_test | BOOLEAN | no | True if classified as a test file (classification rules defined by task #13) |
+| is_test | BOOLEAN | no | True if classified as a test file. Classification rules live in `prompts/test-file-definition.md` — the canonical source shared with the build skill's production-quality scan (task #76 extracted, task #81 wired into the ast-grep walker). |
 | last_indexed | TIMESTAMP | no | When this File node was last refreshed |
 | source_file | STRING | no | The artifact that caused this File to be indexed — `.cc-master/discovery.json` when from discovery, or the literal string `ast-grep-walk` when from a code-graph walk |
 
@@ -203,9 +203,34 @@ The v1 graph defines exactly six node types: `Task`, `Subtask`, `Spec`, `Feature
 - For Files with `source_file = 'ast-grep-walk'` (v1.b and later): on a Module's hash change → DELETE File nodes WHERE `module = <that module name>` AND `source_file = 'ast-grep-walk'` → re-INSERT from the walk output.
 - **Exception to the per-file full-replace invariant:** on a `content_hash` change for a File already indexed via `ast-grep-walk`, UPDATE that File node in place (setting `content_hash`, `size`, `last_indexed`, and any language reclassification). Do NOT trigger a full Module re-index for a single-file content change. This is an explicit exception because (1) File granularity is already per-file — the same unit the "never merge" rule is written against — so a targeted UPDATE does not span multiple source artifacts and cannot drift across them, and (2) a module-level full-replace would re-scan thousands of files on every single-file edit, which blows past the `--touch discovery.json` ≤5s envelope and is unusable in an interactive edit loop. The tradeoff is documented here so future changes do not silently extend this exception to other node types: the exception applies to `File` only, only when triggered by a `content_hash` change, and only for Files with `source_file = 'ast-grep-walk'`. All other File lifecycle paths follow standard DELETE + re-INSERT.
 
+### Symbol
+
+**Purpose:** A named code entity — a function, class, method, struct, interface, type alias, or enum — declared in a source file and extracted by the ast-grep walk during code-graph indexing. Symbol nodes are the v1 addressable unit for code-level queries such as `cc-master:impact` blast-radius traversals and qa-review's "which symbols does this spec touch?" checks. Symbol-level edges to other symbols (CALLS, EXTENDS, IMPLEMENTS_INTERFACE) are NOT in v1 — only `REFERENCES` from `File` to `Symbol` is materialized — so Symbol is a lexical node in v1, not a call-graph node.
+
+**Properties:**
+
+| Name | Type | Nullable | Description |
+|------|------|----------|-------------|
+| id | STRING | no | `sha256(module:file:kind:name:line)[:16]` — a deterministic 16-char hex digest stable across re-indexes of unchanged code |
+| name | STRING | no | The declared symbol name as it appears in source (not qualified — qualification lives in `module` + `file`) |
+| kind | STRING | no | One of: `function`, `class`, `method`, `struct`, `interface`, `type`, `enum`. Other kinds (variable, constant, macro) are deferred to v0.22 |
+| file | STRING | no | Relative path to the source file the symbol is declared in, matching `File.path` |
+| line | INT64 | no | 1-indexed line number of the symbol's declaration as reported by ast-grep |
+| module | STRING | no | Name of the owning Module, matching `Module.name`; resolved by the same longest-prefix match used for `File.module` |
+| source_file | STRING | no | Always `'ast-grep-walk'` for v1 — Symbols are exclusively populated by the code-graph walk, never by discovery.json |
+| last_indexed | TIMESTAMP | no | When this Symbol node was last refreshed |
+
+**Primary key:** `id`
+
+**Indexes:** `name` (for name-resolution queries), `module` (for module-scoped re-index DELETE), `file` (for file-scoped invalidation during REFERENCES re-derivation), `source_file` (for the per-file full-replace invariant)
+
+**Upsert source:** `ast-grep` walk of each Module. The walker emits one Symbol record per qualifying declaration in each source file within the module, stamping each record with `source_file = 'ast-grep-walk'`.
+
+**Lifecycle rules:** On a Module's hash change → DELETE all Symbol nodes WHERE `module = <that module name>` AND `source_file = 'ast-grep-walk'` → re-INSERT from the walk output. Never UPDATE in place. Unlike File, Symbol does NOT receive a UPDATE-in-place exception — a symbol's identity derives from its line number, and a change to the declaration line is indistinguishable from a delete + insert of a new symbol, so the safe behavior is full replace at the module boundary. The File UPDATE-in-place exception (see the File node's Lifecycle rules, final bullet) applies when only a File's `content_hash` changed AND no symbols were added, removed, or moved inside it: in that narrow case the File node is UPDATEd in place and its outgoing `REFERENCES` edges are re-derived in a targeted pass without triggering a full module re-walk. If the targeted pass detects any symbol change, the indexer escalates to the full module DELETE + re-INSERT described above.
+
 ## Edge schema
 
-The v1 graph defines exactly six edge types: `HAS_SUBTASK`, `HAS_SPEC`, `BLOCKED_BY`, `IMPLEMENTS`, `TOUCHES`, and `CONTAINS`. Each edge is derived from a specific JSON artifact or filesystem relationship and follows the same DELETE-then-INSERT lifecycle as the node on whose `source_file` it depends — when the source artifact changes, every edge derived from it is wiped and re-derived from scratch. No edge merges. No edge UPDATEs in place. Edges without a matching target node (dangling references) are silently dropped rather than materialized as half-edges.
+The v1 graph defines seven edge types: `HAS_SUBTASK`, `HAS_SPEC`, `BLOCKED_BY`, `IMPLEMENTS`, `TOUCHES`, `CONTAINS`, and `REFERENCES`. Each edge is derived from a specific JSON artifact or filesystem relationship and follows the same DELETE-then-INSERT lifecycle as the node on whose `source_file` it depends — when the source artifact changes, every edge derived from it is wiped and re-derived from scratch. No edge merges. No edge UPDATEs in place. Edges without a matching target node (dangling references) are silently dropped rather than materialized as half-edges.
 
 ### HAS_SUBTASK
 
@@ -306,6 +331,29 @@ The v1 graph defines exactly six edge types: `HAS_SUBTASK`, `HAS_SPEC`, `BLOCKED
 **Upsert source:** Derived from Module.path prefix matching against File.path. Not upserted directly — computed from the set of Module and File nodes.
 
 **Lifecycle rules:** Re-evaluated whenever Module nodes change (discovery.json hash change) OR File nodes change. Because File nodes may use in-place UPDATE in the code-graph layer (see the Node schema's File section), the CONTAINS edges they own are re-resolved at the end of each index pass as a finalization step. This is idempotent: the same Module+File combo always produces the same CONTAINS edge.
+
+### REFERENCES
+
+**Purpose:** Links a File to each Symbol it lexically references — a call site, an import, or a type annotation. REFERENCES materializes the "who mentions this symbol?" lookup that `cc-master:impact` uses to compute blast radius and that `cc-master:pr-review` uses to annotate PR bodies with the downstream files a change reaches.
+
+**Source → Target:** `File → Symbol`
+
+**Cardinality:** `N:M` (a File may reference many Symbols; a Symbol may be referenced from many Files)
+
+**Properties:**
+
+| Name | Type | Nullable | Description |
+|------|------|----------|-------------|
+| line | INT64 | no | 1-indexed line number in the source File where the reference occurs |
+| context | STRING | no | The trimmed source text of the referencing line — used for human-readable output in impact and pr-review reports (bounded to 240 chars by the walker; longer lines are truncated with a trailing ellipsis) |
+| kind | STRING | no | One of: `call`, `import`, `type_ref`. `call` = function/method invocation; `import` = module/symbol import statement; `type_ref` = type annotation, generic parameter, or extends/implements clause |
+| source_file | STRING | no | Always `'ast-grep-walk'` for v1 — REFERENCES edges are exclusively populated by the code-graph walk |
+
+**Semantic:** A REFERENCES edge expresses a lexical textual reference, not a resolved runtime call. ast-grep matches structural patterns — it sees `login(user)` as a call to a name `login`, and the REFERENCES edge points to every Symbol whose `name = 'login'` within the same module (v1 does NOT perform cross-module name resolution — see "NOT in v1"). Callers that need cross-module or dispatch-aware resolution must fall back to language-specific tooling; the graph provides the lexical substrate only.
+
+**Upsert source:** `ast-grep` walk per module. For each source file in the module, the walker emits one REFERENCES record per matched reference pattern (call / import / type_ref), stamping each record with `source_file = 'ast-grep-walk'` and resolving the target Symbol id by matching `name` + `module` against already-indexed Symbol nodes. References that do not resolve to an existing Symbol within the module are silently dropped (consistent with the general dangling-edge rule stated at the top of this section).
+
+**Lifecycle rules:** On a Module's hash change → DELETE all REFERENCES edges WHERE the source File has `source_file = 'ast-grep-walk'` AND `module = <that module name>` → re-INSERT from the walk output. Never UPDATE in place. Edges live and die with the module's full re-walk cycle. **File UPDATE-in-place exception cross-reference:** when only a File's `content_hash` changed and no symbols were added, removed, or moved (the targeted exception defined in the File node's Lifecycle rules), the File node is UPDATEd in place and its outgoing `REFERENCES` edges are re-derived in a targeted pass — DELETE REFERENCES WHERE the source File matches the single updated path AND `source_file = 'ast-grep-walk'`, then re-INSERT from ast-grep's output for that one file only. This avoids re-walking thousands of files in the module when a single file's body churned without touching its declared symbols. If the targeted re-derivation discovers that the file now introduces or removes a reference whose target Symbol does not exist within the module, the indexer escalates to a full module re-walk rather than persisting a partially consistent edge set.
 
 ## _source metadata table
 
@@ -422,7 +470,7 @@ When `cc-master:index` runs without `--touch`, it iterates all tracked files (fr
 
 ## Canonical queries
 
-**Overview:** The v1 schema is justified by the queries it must serve. This section enumerates the seven canonical Cypher queries that graph-backed skills run — the full working set for v1. Every query uses only the six node types (`Task`, `Subtask`, `Spec`, `Feature`, `Module`, `File`) and six edge types (`HAS_SUBTASK`, `HAS_SPEC`, `BLOCKED_BY`, `IMPLEMENTS`, `TOUCHES`, `CONTAINS`) defined above — no query invents schema. Each query is paired with the skill(s) that run it, the exact parameterization, the result shape a caller should expect, and the fallback path per `prompts/graph-read-protocol.md` when the graph is absent, stale, or erroring. A query that requires a property or relationship the v1 schema does not expose is called out as a limitation and deferred to v0.22+; none of the seven below cross that line.
+**Overview:** The v1 schema is justified by the queries it must serve. This section enumerates the eight canonical Cypher queries that graph-backed skills run — the full working set for v1. Every query uses only the six node types (`Task`, `Subtask`, `Spec`, `Feature`, `Module`, `File`) and six edge types (`HAS_SUBTASK`, `HAS_SPEC`, `BLOCKED_BY`, `IMPLEMENTS`, `TOUCHES`, `CONTAINS`) defined above — no query invents schema. Each query is paired with the skill(s) that run it, the exact parameterization, the result shape a caller should expect, and the fallback path per `prompts/graph-read-protocol.md` when the graph is absent, stale, or erroring. A query that requires a property or relationship the v1 schema does not expose is called out as a limitation and deferred to v0.22+; none of the seven below cross that line.
 
 ### Query 1: Kanban board render
 
@@ -684,14 +732,47 @@ LIMIT 20
 
 **When absent:** The spec skill falls back to globbing `.cc-master/specs/*.md`, extracting the task id from each filename stem into a "has-spec" set, reading `.cc-master/kanban.json`, filtering to parent tasks where `status == 'pending'`, and excluding any task whose id appears in the has-spec set. The same 20-task cap is applied after sorting by priority then id. Semantics are identical; the overhead is the extra JSON read and directory listing.
 
+### Query 8: Tests in a module
+
+**Purpose:** Enumerate the test files that live inside a given Module — the test-scope set that `cc-master:qa-review` uses to decide which tests cover the module under review and that `cc-master:impact` uses to list tests affected by a change to that module. Because v1 does not materialize Test-symbol REFERENCES edges (see NOT in v1), this file-level enumeration is the v1 substitute for "which tests exercise this module?".
+
+**Consuming skill(s):** `cc-master:qa-review`, `cc-master:impact`
+
+**Cypher:**
+
+```cypher
+// Tests in a module — used by qa-review and impact to enumerate test files that exercise a module.
+MATCH (f:File)
+WHERE f.module = $module AND f.is_test = true
+RETURN f.path
+ORDER BY f.path
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| module | STRING | The name of the module whose tests to list — same value stored on `File.module` and `Module.name` |
+
+**Result shape:**
+
+```json
+[
+  {"f.path": "tests/auth/test_login.py"},
+  {"f.path": "tests/auth/test_register.py"}
+]
+```
+
+**When absent:** The consuming skill falls back to reading `.cc-master/discovery.json`, resolving the module's file list, and filtering each file against the path/filename rules in `prompts/test-file-definition.md` in Python — the same classification logic the ast-grep walker applies at index time, just executed per-call instead of pre-derived. Semantics are identical; the overhead is re-running the classifier on every query.
+
 ## NOT in v1
 
 The v1 graph engine deliberately excludes these capabilities. Each is tracked for a future version with a specific trigger for reconsideration.
 
 ### Deferred to v0.22
 
-- **Symbol nodes with dynamic-dispatch resolution** — v1 uses ast-grep, which handles structural patterns but not runtime polymorphism (interface dispatch, reflection, DI container lookups). This is a known accuracy gap. Trigger for v0.22: a real project shows ast-grep-missed call edges that materially affect `cc-master:impact` correctness. Solution path: SCIP indexer swap-in per language (same graph schema, different indexer).
-- **Test-symbol REFERENCES edges** — v1 classifies files as `is_test = true` based on path/filename rules, and edges between Test files and Symbols they exercise are NOT materialized. This means `cc-master:qa-review` cannot answer "which tests cover this symbol?" via graph query — it falls back to string-based test-file greps. Trigger for v0.22: user demand for `cc-master:impact --tests` or `cc-master:qa-review --uncovered-symbols`.
+- **Symbol nodes with dynamic-dispatch resolution / cross-module call closure** — basic Symbol nodes and lexical REFERENCES edges ARE in v1 as of wave 6 (task #12): ast-grep emits Symbol nodes for function/class/method/struct/interface/type/enum declarations and REFERENCES edges for call / import / type_ref references within a module. What is NOT in v1 is dynamic-dispatch resolution (interface dispatch, reflection, DI container lookups, function-pointer-in-a-map jumps) and cross-module call closure (resolving a reference whose target Symbol lives in a different module than the calling File). ast-grep handles structural patterns but not runtime polymorphism, and v1 deliberately scopes REFERENCES to intra-module name matches to keep the edge set bounded and the per-module re-walk cheap. Trigger for v0.22: a real project shows ast-grep-missed call edges that materially affect `cc-master:impact` correctness, OR users demand cross-module impact traversal that Query 4's `BLOCKED_BY` approximation cannot answer. Solution path: SCIP indexer swap-in per language (same graph schema, different indexer) with first-class cross-module symbol resolution.
+- **Test-symbol REFERENCES edges** — v1 classifies files as `is_test = true` based on the path/filename rules in `prompts/test-file-definition.md`, but edges between Test files and the production Symbols they exercise are NOT materialized. This means the graph can answer "which files in a module are tests?" (Query 8) but cannot answer "which tests cover this specific symbol?" or "which production symbols have no covering test?" via graph query. Trigger for v0.22 is EITHER (a) user demand for `/cc-master:impact --tests` (list tests that cover a changed symbol), OR (b) user demand for `/cc-master:qa-review --uncovered-symbols` (find production symbols without test coverage). v1 workaround: string-based test-file greps in qa-review fall back to `MATCH (f:File) WHERE f.is_test = true` for the module scope (Query 8) and then scan those files' contents for symbol names — coarse but sufficient until one of the two v0.22 triggers fires.
 - **CompetitorInsight nodes** — `.cc-master/competitor_analysis.json` pain points and market gaps are not yet indexed. `cc-master:spec` resolves them via direct JSON read. Trigger for v0.22: roadmap feature cross-referencing becomes expensive enough to justify graph materialization.
 
 ### Deferred to v0.23

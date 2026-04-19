@@ -76,6 +76,103 @@ Thin Python CLI wrapper around the Kuzu bindings. All stdout is JSON. All errors
 
 **Invariant:** Only `cc-master:index` executes write Cypher (CREATE / MERGE / DELETE). All other skills use MATCH / RETURN only. See [`docs/plans/2026-04-graph-engine-v1.md`](../../docs/plans/2026-04-graph-engine-v1.md).
 
+## astgrep_walker.py
+
+Walks one module directory with `ast-grep` and emits JSON describing every source file, every top-level symbol definition, and every reference (call / import / type_ref) within the module. The code-graph indexer (`cc-master:index`) consumes this output per module, DELETEs prior walk output for the module from Kuzu, and INSERTs the fresh records in a single transaction.
+
+**Usage:**
+
+    python3 scripts/graph/astgrep_walker.py \
+        --module <module-name> \
+        --module-path <absolute-directory>
+
+**Arguments:**
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--module <name>` | yes | Module node name stamped on every emitted File / Symbol / REFERENCES record. |
+| `--module-path <abs-dir>` | yes | Absolute directory to walk. |
+| `--stdout-json` | no | Print JSON to stdout (default; flag retained for explicit CLI contracts). |
+| `--patterns-dir <dir>` | no | Override the default `astgrep_patterns/` directory (useful for tests). |
+| `--project-root <dir>` | no | Root used to compute file paths. Defaults to the nearest ancestor containing `.cc-master/` or `.git/`. |
+| `-h`, `--help` | no | Print argparse usage and exit 0. |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success — stdout: single JSON document |
+| 1    | Argument error, missing/invalid `--module-path`, or unexpected exception |
+| 2    | `ast-grep` binary missing — stderr: install instructions |
+
+**Output JSON shape:**
+
+    {
+      "module": "<name>",
+      "module_path": "<abs>",
+      "walked_at": "<ISO-8601 UTC, seconds precision, trailing Z>",
+      "files": [
+        {
+          "path": "<rel-to-project-root>",
+          "module": "<name>",
+          "language": "python|typescript|javascript|go|java|rust|null",
+          "content_hash": "<sha256 hex>",
+          "size": <bytes>,
+          "is_test": false,
+          "last_indexed": "<ISO>"
+        }
+      ],
+      "symbols": [
+        {
+          "id": "<16-char hex>",
+          "name": "<str>",
+          "kind": "function|class|method|struct|interface|type|enum",
+          "file": "<rel>",
+          "line": <1-based int>,
+          "module": "<name>"
+        }
+      ],
+      "references": [
+        {
+          "symbol_id": "<16-char hex or null>",
+          "symbol_name": "<str>",
+          "file": "<rel>",
+          "line": <1-based int>,
+          "context": "<snippet, collapsed whitespace, ≤200 chars>",
+          "kind": "call|import|type_ref"
+        }
+      ]
+    }
+
+**Symbol ID:** `sha256(module + ':' + file + ':' + kind + ':' + name + ':' + line).hexdigest()[:16]`. Re-running on unchanged source produces identical IDs.
+
+**Per-language patterns:** `scripts/graph/astgrep_patterns/<lang>.yml` — one file per supported language (`python`, `typescript`, `go`, `java`, `rust`). JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`) shares `typescript.yml`. Each file keys emit categories (`function`, `class`, `method`, `struct`, `interface`, `type`, `enum`, `import`, `call`, `type_ref`) to a list of `- pattern: "<ast-grep pattern>"` entries.
+
+**Error modes:**
+
+- `ast-grep` missing from PATH → stderr: install instructions identical in spirit to `check_astgrep.sh`; exit 2.
+- Malformed ast-grep JSON line → one stderr warning, skip the match, continue.
+- Unreadable file (permissions, encoding error, bad stat) → one stderr warning, skip the file, continue the walk.
+- Binary file (null byte in first 8 KB) → skipped silently.
+- File larger than 1 MB → one stderr warning, skipped.
+- Ignored directory names (`.git`, `node_modules`, `target`, `build`, `dist`, `__pycache__`, `.next`, `.venv`, `venv`, `.tox`, `.mypy_cache`, `.pytest_cache`) → pruned at every depth.
+
+**Scope guarantees:**
+
+- No network I/O, no pip dependencies — Python 3.10+ stdlib only.
+- Stdin is never read.
+- Kuzu write failures are not the walker's concern; it only emits JSON. The indexer consumes it.
+- Dynamic-dispatch resolution is intentionally out of scope for v1 — per-file references whose target cannot be resolved by name+kind inside the same module get `symbol_id: null`. Cross-module resolution is the indexer's job.
+
+**Example (self-test):**
+
+    $ python3 scripts/graph/astgrep_walker.py --module scripts --module-path $(pwd)/scripts \
+        | python3 -m json.tool | head
+    {
+        "module": "scripts",
+        ...
+    }
+
 ## Prerequisite checks
 
 Summary of the check scripts for the v2 graph engine's optional dependencies.
