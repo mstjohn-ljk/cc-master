@@ -15,13 +15,34 @@ Exit codes:
     3  database path not found (query/close on non-existent db)
     4  Cypher parse or runtime error
 """
+# Self-reexec into the plugin's managed venv if the current interpreter
+# can't import kuzu. This lets the script work on systems where python3
+# is 3.14 (no Kuzu wheel) or PEP 668-locked. The venv is created by
+# scripts/graph/ensure-venv.sh (runs as SessionStart hook).
+import os as _os
+import sys as _sys
+try:
+    import kuzu as _kuzu_probe  # noqa: F401
+except ImportError:
+    _data = _os.environ.get("CLAUDE_PLUGIN_DATA", "")
+    if _data:
+        _venv_py = _os.path.join(_data, "venv", "bin", "python3")
+        if _os.path.exists(_venv_py) and _os.path.realpath(_venv_py) != _os.path.realpath(_sys.executable):
+            _os.execv(_venv_py, [_venv_py, __file__, *_sys.argv[1:]])
+    # fall through — _load_kuzu() below will emit the standard error
+
 import argparse
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
-INSTALL_MSG = "kuzu Python binding required: pip install kuzu==0.11.2"
+INSTALL_MSG = (
+    "kuzu Python binding required. The cc-master plugin manages a venv at "
+    "$CLAUDE_PLUGIN_DATA/venv populated by the SessionStart hook. "
+    "If you see this error, restart your Claude Code session or run: "
+    "bash $CLAUDE_PLUGIN_ROOT/scripts/graph/ensure-venv.sh"
+)
 
 
 def _err(msg: str, code: int) -> None:

@@ -111,7 +111,7 @@ First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run 
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
 Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
@@ -151,7 +151,7 @@ After printing the diagnostic, the skill exits without writing any output file. 
    For each dependent artifact, run the `_source` lookup via the Kuzu client:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '<path>'}) RETURN s.content_hash AS stored"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '<path>'}) RETURN s.content_hash AS stored"
    ```
 
    `<path>` is the full relative path as stored in `_source.file_path` — for artifacts under `.cc-master/` the stored path retains the `.cc-master/` prefix, so the query MUST include that prefix or no rows match.
@@ -202,7 +202,7 @@ The `--params-json` JSON object MUST be built with a real JSON serializer — ne
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"path": sys.argv[1]}))' "$TARGET_PATH")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<cypher with \$path>" --params-json "$PARAMS_JSON"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<cypher with \$path>" --params-json "$PARAMS_JSON"
 ```
 
 Any helper implementation that builds the Cypher by concatenating target text violates this contract. Violations are a CRITICAL review finding.
@@ -232,7 +232,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"task_id": int(sys.argv[1])}))' "$TASK_ID")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (start:Task {id: \$task_id})<-[:BLOCKED_BY*1..5]-(downstream:Task) WITH DISTINCT downstream RETURN downstream.id AS id, downstream.subject AS subject, downstream.status AS status, downstream.priority AS priority ORDER BY downstream.priority, downstream.id LIMIT 50" \
   --params-json "$PARAMS_JSON"
 ```
@@ -254,7 +254,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"task_id": int(sys.argv[1])}))' "$TASK_ID")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (start:Task {id: \$task_id})-[:BLOCKED_BY*1..10]->(blocker:Task) WITH DISTINCT blocker RETURN blocker.id AS id, blocker.subject AS subject, blocker.status AS status ORDER BY blocker.status, blocker.id" \
   --params-json "$PARAMS_JSON"
 ```
@@ -273,7 +273,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"task_id": int(sys.argv[1])}))' "$TASK_ID")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (t:Task {id: \$task_id})-[:HAS_SPEC]->(s:Spec)-[:TOUCHES]->(m:Module) MATCH (m)-[:CONTAINS]->(f:File) RETURN DISTINCT f.path AS path, m.name AS module_name" \
   --params-json "$PARAMS_JSON"
 ```
@@ -291,7 +291,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"task_id": int(sys.argv[1])}))' "$TASK_ID")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (t:Task {id: \$task_id})-[:IMPLEMENTS]->(f:Feature) RETURN f.id AS id, f.title AS title, f.status AS status" \
   --params-json "$PARAMS_JSON"
 ```
@@ -315,7 +315,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"feature_id": sys.argv[1]}))' "$FEATURE_ID")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (f:Feature {id: \$feature_id})<-[:IMPLEMENTS]-(t:Task) RETURN t.id AS id, t.subject AS subject, t.status AS status" \
   --params-json "$PARAMS_JSON"
 ```
@@ -374,7 +374,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"path": sys.argv[1]}))' "$TARGET_PATH")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (sym:Symbol {file: \$path}) MATCH (other:File)-[:REFERENCES]->(sym) WHERE other.path <> \$path RETURN DISTINCT other.path AS path, sym.name AS symbol_name, sym.kind AS kind" \
   --params-json "$PARAMS_JSON"
 ```
@@ -392,7 +392,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"path": sys.argv[1]}))' "$TARGET_PATH")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (m:Module)-[:CONTAINS]->(f:File {path: \$path}) RETURN m.name AS module_name" \
   --params-json "$PARAMS_JSON"
 ```
@@ -412,7 +412,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"module_name": sys.argv[1]}))' "$MODULE_NAME")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (m:Module {name: \$module_name})-[:CONTAINS]->(f:File) WHERE f.is_test = true RETURN f.path AS path ORDER BY f.path" \
   --params-json "$PARAMS_JSON"
 ```
@@ -432,7 +432,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"module_name": sys.argv[1]}))' "$MODULE_NAME")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (t:Task)-[:HAS_SPEC]->(s:Spec)-[:TOUCHES]->(m:Module {name: \$module_name}) WHERE t.status IN ['pending', 'in_progress'] RETURN DISTINCT t.id AS id, t.subject AS subject, t.status AS status, s.file_path AS spec_file ORDER BY t.id" \
   --params-json "$PARAMS_JSON"
 ```
@@ -460,7 +460,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$SYMBOL_NAME")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (s:Symbol {name: \$name}) RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.module AS module ORDER BY s.file, s.line" \
   --params-json "$PARAMS_JSON"
 ```
@@ -505,7 +505,7 @@ Invocation:
 
 ```
 PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"symbol_id": sys.argv[1]}))' "$SYMBOL_ID")
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (f:File)-[:REFERENCES]->(sym:Symbol {id: \$symbol_id}) RETURN DISTINCT f.path AS path ORDER BY f.path" \
   --params-json "$PARAMS_JSON"
 ```

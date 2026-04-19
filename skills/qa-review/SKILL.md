@@ -155,7 +155,7 @@ First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run 
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
 Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
@@ -170,7 +170,7 @@ Execute the three pre-query checks in order:
 
 - **Check 1 — graph directory exists.** Verify `.cc-master/graph.kuzu` exists on disk (file or directory) and is readable. On failure → emit the standard one-warning-per-session line `"Graph absent/stale — falling back to JSON read for kanban.json"` (if not already emitted this session) and fall through to the JSON-fallback path.
 - **Check 2 — `_source.content_hash` matches.** For `.cc-master/kanban.json`, compute the canonical-json SHA-256 (sort_keys, separators=`(",", ":")`, UTF-8 bytes) and compare against the `_source.content_hash` row for `.cc-master/kanban.json`. For the spec markdown file `.cc-master/specs/<task-id>.md`, compute the raw-bytes SHA-256 (no normalization) and compare against the `_source.content_hash` row for that spec path. `_source.file_path` stores the full relative path with the `.cc-master/` prefix — queries MUST use that prefix. On any mismatch → emit the standard warning (once per session) and fall through to JSON-fallback.
-- **Check 3 — query executes cleanly.** Run the Cypher via `scripts/graph/kuzu_client.py`. If exit code is non-zero, or stderr is non-empty, emit the standard warning (once per session) and fall through to JSON-fallback. Do NOT retry the graph query in the same session.
+- **Check 3 — query executes cleanly.** Run the Cypher via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. If exit code is non-zero, or stderr is non-empty, emit the standard warning (once per session) and fall through to JSON-fallback. Do NOT retry the graph query in the same session.
 
 Set `mode = "graph"` when all three checks pass; `mode = "json-fallback"` otherwise.
 
@@ -187,7 +187,7 @@ RETURN DISTINCT f.path AS file_path,
 Invocation:
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<the cypher above>" --params-json '{"task_id": <id>}'
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<the cypher above>" --params-json '{"task_id": <id>}'
 ```
 
 **Parameter-Binding Contract (Security / Correctness):** The `$task_id` parameter MUST be bound via `--params-json` — NEVER string-concatenated or f-string-interpolated into the Cypher text. This matches the invariant stated in `skills/kanban-add/SKILL.md` "Parameter-Binding Contract": `--params-json` binds the value as a parameter at execution time so `$task_id` is always treated as an opaque literal by Kuzu's parser, while concatenation is a query-injection vector analogous to SQL injection. Any implementation that builds the Cypher by concatenating the task id violates this contract and is a CRITICAL review finding.
@@ -220,7 +220,7 @@ For each path in the files-changed set (after safety validation), apply these ru
    Invocation:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:File {path: \$path})<-[:CONTAINS]-(m:Module) RETURN m.name AS module_name" --params-json '{"path": "<changed-path>"}'
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:File {path: \$path})<-[:CONTAINS]-(m:Module) RETURN m.name AS module_name" --params-json '{"path": "<changed-path>"}'
    ```
 
    If this query returns no module row (the file is not in the graph yet), treat the file as out-of-scope different-module and apply rule 3 (HIGH). If this per-file Cypher call exits non-zero while the first Query 6 call succeeded, treat the module as unknown and apply rule 3 (HIGH) — do NOT re-run the protocol or downgrade to JSON-fallback.

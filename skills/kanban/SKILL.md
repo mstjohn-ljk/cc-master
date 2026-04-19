@@ -39,7 +39,7 @@ First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run 
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
 Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
@@ -57,7 +57,7 @@ Execute the checks in order:
 2. **Check 2 — Source hash matches.** Run the `_source` lookup via the Kuzu client:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
    ```
 
    Compute the on-disk canonical-JSON hash of `.cc-master/kanban.json` using the JSON-artifact algorithm specified in `prompts/graph-read-protocol.md` (`## Hash Comparison Rule`):
@@ -76,18 +76,18 @@ If all three checks pass, set `render_source = "graph"` and proceed to Step 1c.
 
 ### Step 1c: Graph Query
 
-With `render_source = "graph"`, shell out to `scripts/graph/kuzu_client.py query` against `.cc-master/graph.kuzu/` to fetch the task and subtask rowsets. Each invocation runs one Cypher statement and returns JSON rows on stdout.
+With `render_source = "graph"`, shell out to `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query` against `.cc-master/graph.kuzu/` to fetch the task and subtask rowsets. Each invocation runs one Cypher statement and returns JSON rows on stdout.
 
 **Query A — Tasks:**
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) RETURN t.id AS id, t.subject AS subject, t.status AS status, t.priority AS priority, t.source AS source, t.owner AS owner, t.competitor_insight_ids AS competitor_insight_ids, t.phase AS phase"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) RETURN t.id AS id, t.subject AS subject, t.status AS status, t.priority AS priority, t.source AS source, t.owner AS owner, t.competitor_insight_ids AS competitor_insight_ids, t.phase AS phase"
 ```
 
 **Query B — Subtasks:**
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Subtask) RETURN s.id AS id, s.parent_id AS parent_id, s.subject AS subject, s.status AS status, s.blocked_by AS blocked_by, s.wave AS wave"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Subtask) RETURN s.id AS id, s.parent_id AS parent_id, s.subject AS subject, s.status AS status, s.blocked_by AS blocked_by, s.wave AS wave"
 ```
 
 Inspect each invocation's exit code. On exit code 4 (Cypher parse/runtime error), or exit codes 2 or 3, or any non-zero exit, or non-empty stderr → this is Check 3 failing mid-query: set `render_source = "JSON fallback"`, emit the one-warning line `Graph absent/stale — falling back to JSON read for kanban.json` if not already emitted this session, discard any partial rowset, and fall through to Step 2 using the JSON `tasks[]` array.

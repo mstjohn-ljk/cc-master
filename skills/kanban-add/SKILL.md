@@ -55,7 +55,7 @@ First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run 
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
 Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
@@ -89,7 +89,7 @@ Any helper implementation that builds the Cypher by concatenating user text viol
 2. **Check 2 — Source hash matches.** Query the stored `_source` row for `.cc-master/kanban.json` via the Kuzu client:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
    ```
 
    Compute the on-disk canonical-JSON SHA-256 hex using the JSON-artifact algorithm in `prompts/graph-read-protocol.md` (`## Hash Comparison Rule` → JSON artifacts): parse the JSON, re-serialize with `sort_keys=True` and `separators=(",", ":")`, then SHA-256 the UTF-8 bytes of that canonical string:
@@ -106,7 +106,7 @@ Any helper implementation that builds the Cypher by concatenating user text viol
 
    ```
    PARAMS_JSON=$(python3 -c 'import json,sys; print(json.dumps({"subject_fragment": sys.argv[1], "source": sys.argv[2]}))' "$SUBJECT" "$SOURCE")
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (t:Task) WHERE toLower(t.subject) CONTAINS toLower(\$subject_fragment) AND t.source = \$source RETURN t.id AS id, t.subject AS subject" \
      --params-json "$PARAMS_JSON"
    ```
@@ -116,7 +116,7 @@ Any helper implementation that builds the Cypher by concatenating user text viol
    **Structural shape only (DO NOT copy this form into a real invocation — see safe-construction snippet above):**
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) WHERE toLower(t.subject) CONTAINS toLower($subject_fragment) AND t.source = $source RETURN t.id AS id, t.subject AS subject" --params-json '{"subject_fragment": "<subject_fragment>", "source": "<source>"}'
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) WHERE toLower(t.subject) CONTAINS toLower($subject_fragment) AND t.source = $source RETURN t.id AS id, t.subject AS subject" --params-json '{"subject_fragment": "<subject_fragment>", "source": "<source>"}'
    ```
 
    The `<subject_fragment>` and `<source>` placeholders inside the `--params-json` JSON object are the argument values, JSON-escaped by the caller (use a real JSON serializer — do not hand-build the string). Kuzu binds `$subject_fragment` and `$source` at execution time.

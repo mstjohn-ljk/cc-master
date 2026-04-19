@@ -94,7 +94,7 @@ The task is specified via arguments. Accept any of:
   **Check 2 — Source hash matches.** Run the `_source` lookup for `.cc-master/kanban.json` via the Kuzu client:
 
   ```
-  python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
   ```
 
   Inspect exit code. Compute the on-disk canonical-JSON hash of `.cc-master/kanban.json` using the JSON-artifact algorithm specified in `prompts/graph-read-protocol.md` (`## Hash Comparison Rule`):
@@ -110,7 +110,7 @@ The task is specified via arguments. Accept any of:
   If Checks 1 and 2 pass, set `all_expansion_source = "graph"` (pending Check 3 on query execution) and run the following Cypher query:
 
   ```
-  python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) WHERE NOT (t)-[:HAS_SPEC]->(:Spec) AND t.status = 'pending' RETURN t.id AS id, t.subject AS subject, t.priority AS priority ORDER BY priority, id"
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) WHERE NOT (t)-[:HAS_SPEC]->(:Spec) AND t.status = 'pending' RETURN t.id AS id, t.subject AS subject, t.priority AS priority ORDER BY priority, id"
   ```
 
   Apply Check 3 to this invocation. On clean execution, collect the rowset.
@@ -185,7 +185,7 @@ This step has three substeps: (1) read `discovery.json` for architecture context
    Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
    Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
    Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-   Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+   Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
    Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
    Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
    If any pre-query check above fails for this query, fall back to reading
@@ -210,7 +210,7 @@ This step has three substeps: (1) read `discovery.json` for architecture context
    **Check 2 — Source hash matches.** Run the `_source` lookup via the Kuzu client for `.cc-master/kanban.json` (the dependent artifact that carries the parent task and any sibling specs referenced by graph edges):
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:_source {file_path: '.cc-master/kanban.json'}) RETURN s.content_hash AS stored"
    ```
 
    Compute the on-disk canonical-JSON hash of `.cc-master/kanban.json` using the JSON-artifact algorithm specified in `prompts/graph-read-protocol.md` (`## Hash Comparison Rule`):
@@ -221,7 +221,7 @@ This step has three substeps: (1) read `discovery.json` for architecture context
 
    If no `_source` row is returned, or the stored hash differs from the current on-disk hash → set `context_source = "JSON fallback"`, emit the one-warning line `Graph absent/stale — falling back to JSON read for specs context` if not already emitted this session, set `$related_spec_files = []`, and proceed to substep 3.
 
-   **Check 3 — Query executes cleanly.** Guard every `scripts/graph/kuzu_client.py` shell-out below with exit-code inspection. If any `kuzu_client.py query` invocation exits non-zero (codes 2, 3, 4, or any other) or writes to stderr → set `context_source = "JSON fallback"`, emit the one-warning line `Graph absent/stale — falling back to JSON read for specs context` if not already emitted this session, discard any partial rowset, set `$related_spec_files = []`, and proceed to substep 3. Once fallback has been taken for this invocation, do NOT retry the graph query — the protocol forbids retry.
+   **Check 3 — Query executes cleanly.** Guard every `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` shell-out below with exit-code inspection. If any `kuzu_client.py query` invocation exits non-zero (codes 2, 3, 4, or any other) or writes to stderr → set `context_source = "JSON fallback"`, emit the one-warning line `Graph absent/stale — falling back to JSON read for specs context` if not already emitted this session, discard any partial rowset, set `$related_spec_files = []`, and proceed to substep 3. Once fallback has been taken for this invocation, do NOT retry the graph query — the protocol forbids retry.
 
    If all three checks pass, `context_source` remains `"graph"` and the two queries below run.
 
@@ -230,7 +230,7 @@ This step has three substeps: (1) read `discovery.json` for architecture context
    Pass `$candidate_files` as the `candidate_files` parameter via the kuzu_client `query --param` interface:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module)-[:CONTAINS]->(f:File) WHERE f.path IN $candidate_files RETURN DISTINCT m.name AS name, m.path AS path"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module)-[:CONTAINS]->(f:File) WHERE f.path IN $candidate_files RETURN DISTINCT m.name AS name, m.path AS path"
    ```
 
    Inspect exit code; on non-zero or non-empty stderr, fall back per Check 3 above. Collect the returned `name` values into `$touched_modules`. If the rowset is empty (no files matched any indexed module), set `$touched_modules = []` and skip Query B, setting `$related_spec_files = []`.
@@ -238,7 +238,7 @@ This step has three substeps: (1) read `discovery.json` for architecture context
    **Query B — Find specs that touch the same modules.** Only execute if `$touched_modules` is non-empty.
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Spec)-[:TOUCHES]->(m:Module) WHERE m.name IN $touched_modules RETURN DISTINCT s.task_id AS task_id, s.file_path AS file_path ORDER BY s.task_id LIMIT 5"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Spec)-[:TOUCHES]->(m:Module) WHERE m.name IN $touched_modules RETURN DISTINCT s.task_id AS task_id, s.file_path AS file_path ORDER BY s.task_id LIMIT 5"
    ```
 
    Inspect exit code; on non-zero or non-empty stderr, fall back per Check 3 above. Collect the returned `file_path` strings (e.g. `.cc-master/specs/15.md`) into the `$related_spec_files` list, preserving the query's `ORDER BY s.task_id` order and the `LIMIT 5` cap. These are the top five specs that touch the same modules as the current task's candidate files — Step 3 consumes `$related_spec_files` to pre-load pattern references and to avoid duplicating coverage already captured in a sibling spec.

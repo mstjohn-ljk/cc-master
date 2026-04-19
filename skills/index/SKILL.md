@@ -5,7 +5,7 @@ description: v2 graph engine — upsert cc-master JSON artifacts (kanban.json, r
 
 # cc-master:index — JSON→Kuzu Graph Upsert
 
-Read the cc-master state artifacts — `.cc-master/kanban.json`, `.cc-master/roadmap.json`, `.cc-master/discovery.json`, and `.cc-master/specs/*.md` — and upsert their contents into the Kuzu embedded graph database at `.cc-master/graph.kuzu/`. This skill is the **sole writer** of the graph: every other cc-master skill reads from the graph (with JSON fallback) and must never issue write queries. All Kuzu operations shell out to `scripts/graph/kuzu_client.py`; this skill never links to the Kuzu library directly.
+Read the cc-master state artifacts — `.cc-master/kanban.json`, `.cc-master/roadmap.json`, `.cc-master/discovery.json`, and `.cc-master/specs/*.md` — and upsert their contents into the Kuzu embedded graph database at `.cc-master/graph.kuzu/`. This skill is the **sole writer** of the graph: every other cc-master skill reads from the graph (with JSON fallback) and must never issue write queries. All Kuzu operations shell out to `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`; this skill never links to the Kuzu library directly.
 
 ## Task Persistence Protocol
 
@@ -256,7 +256,7 @@ Applies ONLY to `_source` entries whose `file_path` column begins with the pseud
 
 Algorithm:
 
-1. Enumerate every file belonging to the module — the `files` array from `scripts/graph/astgrep_walker.py`'s stdout (Step 5.4 Phase 2), which already carries each file's `content_hash`. (Outside Step 5.4, the same list can be derived from the Module's CONTAINS-linked File nodes where `source_file = 'ast-grep-walk'`, though Step 5.4 itself avoids that query by reusing the walker output.)
+1. Enumerate every file belonging to the module — the `files` array from `${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py`'s stdout (Step 5.4 Phase 2), which already carries each file's `content_hash`. (Outside Step 5.4, the same list can be derived from the Module's CONTAINS-linked File nodes where `source_file = 'ast-grep-walk'`, though Step 5.4 itself avoids that query by reusing the walker output.)
 2. For each file, compute its raw byte SHA-256 (same as the markdown rule — no normalization).
 3. Build a sorted list of strings of the form `"<file_path>:<file_content_hash>"` (sort by file_path, ASCII order).
 4. Join the sorted list with newline (`\n`) separators.
@@ -264,7 +264,7 @@ Algorithm:
 
 Rationale: detects file additions, deletions, and content changes anywhere inside a module with a single composite digest — the indexer does NOT have to enumerate per-file _source rows for the module's interior. Adding a file changes the sorted list. Deleting a file changes the sorted list. Editing a file changes one line of the sorted list.
 
-Consumed by Step 5.4 (code-graph pass, per-module) — Phase 2's per-module hash-compare reuses this function verbatim against the `ast-grep-walk:<module-name>` pseudo-path row in `_source`. The walker at `scripts/graph/astgrep_walker.py` already captures each file's `content_hash` in its output, so Step 5.4 does not re-hash disk bytes — it feeds the walker's File records into the sort-join-SHA256 composition above.
+Consumed by Step 5.4 (code-graph pass, per-module) — Phase 2's per-module hash-compare reuses this function verbatim against the `ast-grep-walk:<module-name>` pseudo-path row in `_source`. The walker at `${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py` already captures each file's `content_hash` in its output, so Step 5.4 does not re-hash disk bytes — it feeds the walker's File records into the sort-join-SHA256 composition above.
 
 ### Race safety: read bytes once, hash the bytes, parse the bytes
 
@@ -276,7 +276,7 @@ Concretely for the skill-executor:
 
 - For JSON files: the one-liner above opens the file, `json.load` consumes it once, then `json.dumps` re-serializes the parsed object in memory. The hash is computed from the re-serialized string, not from a second disk read. The parser then receives either the already-loaded in-memory dict (preferred) or a fresh `json.load` of the same bytes (acceptable only if the bytes are captured to a variable first and both calls use that variable). Never issue two independent `open(path).read()` calls.
 - For markdown specs: read the bytes into a local variable (`bytes_ = open(path, 'rb').read()`), hash `bytes_`, then pass `bytes_` to the specs parser's text-decode step. The parser does not re-open the file.
-- For code-graph module walks (Step 5.4): `scripts/graph/astgrep_walker.py` reads each underlying file once (`_hash_file` in the walker), captures the SHA-256 in the walker output's `files[].content_hash` field, and the same bytes feed the walker's pattern-matching pass. The composite module hash is computed in-process by Step 5.4 from the walker output — no re-read of disk bytes inside the indexer.
+- For code-graph module walks (Step 5.4): `${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py` reads each underlying file once (`_hash_file` in the walker), captures the SHA-256 in the walker output's `files[].content_hash` field, and the same bytes feed the walker's pattern-matching pass. The composite module hash is computed in-process by Step 5.4 from the walker output — no re-read of disk bytes inside the indexer.
 
 If the file is modified mid-pass despite this discipline (e.g., another process writes while Python holds the fd open), the behavior is defined by the OS filesystem semantics — on POSIX the in-memory bytes reflect a consistent snapshot of what was on disk at read time, and the mutation is picked up on the NEXT indexing pass. That is acceptable and expected.
 
@@ -324,7 +324,7 @@ Record a wall-clock start timestamp as the very first action of this step (e.g.,
 
 **Substep 1.3 — Strip and validate `--module <name>`.** If `--module` appears as a whole token, the very next token is its value. Apply the Module name rule from `## Input Validation Rules`: regex-match `^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$` (the skill MUST reject on regex failure with: `"Invalid --module value '<name>'. Must match ^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$."` and exit 1), then verify the module is known. Membership lookup order:
 
-  1. Query the graph: `python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module {name: $name}) RETURN m.name AS name" --params-json '{"name": "<name>"}'`. If the query exits 0 with a non-empty row set, the module is known — skip step 2.
+  1. Query the graph: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module {name: $name}) RETURN m.name AS name" --params-json '{"name": "<name>"}'`. If the query exits 0 with a non-empty row set, the module is known — skip step 2.
   2. Fall back to `discovery.json`: if the graph query returned zero rows, or the graph is absent (exit 3 from `kuzu_client.py`), or any other non-zero exit, parse `.cc-master/discovery.json`, collect `modules[].name` into a set, and check membership.
 
   If neither source records the module, reject with the exact error from `## Input Validation Rules`: `"Module '<name>' not found in discovery.json or graph. Run /cc-master:discover --update first or choose an existing module."` and exit 3. If `--module` appears with no following value (end of argument list, or next token is another flag), reject with: `"--module requires a value. Usage: cc-master:index --module <name>."` and exit 1. On success, set in-memory `module = "<name>"` and remove both tokens (`--module` and its value) from the working argument string.
@@ -425,7 +425,7 @@ The Kuzu Python binding is a hard prerequisite for this skill — `cc-master:ind
 Run the availability check via the Bash tool:
 
 ```
-bash scripts/graph/check_kuzu.sh
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/graph/check_kuzu.sh
 ```
 
 Interpret the exit code as follows:
@@ -444,7 +444,7 @@ Interpret the exit code as follows:
 
 The graph database lives at `.cc-master/graph.kuzu/` (a directory Kuzu manages). The DDL below is the v1 schema of record; it mirrors the node and edge definitions in `docs/plans/2026-04-graph-engine-v1.md` (see "Node schema" and "Edge schema" sections). If the DDL here and the design doc ever diverge, the design doc is authoritative — stop and reconcile before writing Cypher.
 
-All Kuzu operations in this step shell out to `scripts/graph/kuzu_client.py`. Its exit-code contract is:
+All Kuzu operations in this step shell out to `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. Its exit-code contract is:
 
 | Exit | Meaning | Skill response |
 |------|---------|----------------|
@@ -459,7 +459,7 @@ All Kuzu operations in this step shell out to `scripts/graph/kuzu_client.py`. It
 Check whether `.cc-master/graph.kuzu/` exists (as a directory). If it does not:
 
 ```
-python3 scripts/graph/kuzu_client.py init .cc-master/graph.kuzu
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py init .cc-master/graph.kuzu
 ```
 
 Expect exit code 0 and a single JSON object on stdout of the form:
@@ -477,7 +477,7 @@ If the directory already exists, skip the `init` call — Kuzu's `init` is idemp
 Run each of the following statements, in the order listed, via a separate invocation:
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<statement>"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<statement>"
 ```
 
 Every statement uses `IF NOT EXISTS`, making the step fully idempotent — re-running the skill on an already-bootstrapped graph is a no-op at the schema layer.
@@ -511,13 +511,13 @@ On any non-zero exit from a `kuzu_client.py query` call, follow the contract tab
 This substep detects that drift and heals it in place using Kuzu's `ALTER TABLE … ADD <col> <type>` DDL. The ALTER path was verified against `kuzu==0.11.2` on 2026-04-18 with the following reproduction (captured verbatim for the record):
 
 ```
-$ python3 scripts/graph/kuzu_client.py init /tmp/kuzu-alter-test-72732
+$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py init /tmp/kuzu-alter-test-72732
 {"status": "ok", "db_path": "/private/tmp/kuzu-alter-test-72732", "kuzu_version": "0.11.2"}
-$ python3 scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "CREATE NODE TABLE TestNode(id INT64, PRIMARY KEY (id))"
+$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "CREATE NODE TABLE TestNode(id INT64, PRIMARY KEY (id))"
 [{"result": "Table TestNode has been created."}]
-$ python3 scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "ALTER TABLE TestNode ADD foo STRING"
+$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "ALTER TABLE TestNode ADD foo STRING"
 [{"result": "Property foo added to table TestNode."}]   # exit 0
-$ python3 scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "MATCH (n:TestNode) RETURN n.foo AS foo"
+$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "MATCH (n:TestNode) RETURN n.foo AS foo"
 []                                                      # exit 0 — column readable, zero rows as expected
 ```
 
@@ -528,7 +528,7 @@ Run this substep AFTER every `CREATE NODE TABLE IF NOT EXISTS` in Step 3.2 has e
 1. Probe the column with a read query:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (n:<Table>) RETURN n.<column> LIMIT 1"
    ```
 
@@ -537,7 +537,7 @@ Run this substep AFTER every `CREATE NODE TABLE IF NOT EXISTS` in Step 3.2 has e
    - **Exit 4 with an error message matching "property … not found" / "no such property" (Kuzu phrasings vary by version; a substring search for `"not found"` or `"does not exist"` is the robust match):** the column is missing. Issue:
 
      ```
-     python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
        "ALTER TABLE <Table> ADD <column> <kuzu_type>"
      ```
 
@@ -564,7 +564,7 @@ When this table grows in future waves (new columns added to other node types), a
 After all DDL statements execute cleanly, run a final smoke query to prove the database is readable end-to-end:
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:_Marker) RETURN count(m) AS c"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:_Marker) RETURN count(m) AS c"
 ```
 
 The `_Marker` node table was created by `kuzu_client.py init` itself (see `cmd_init` in the CLI) specifically so this smoke query always has a table to target, regardless of whether any v1 data has been loaded yet.
@@ -593,7 +593,7 @@ This step runs before any file processing. It ensures the graph doesn't accumula
 Query `_source` for every file the indexer has ever written a bookkeeping row for:
 
 ```
-python3 scripts/graph/kuzu_client.py query \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
   "MATCH (s:_source) RETURN s.file_path AS fp" \
   --params-json '{}'
 ```
@@ -612,7 +612,7 @@ Iterate the captured records one at a time. For each `fp`:
 2. **Pseudo-path override for `ast-grep-walk:<module-name>`.** If `fp` begins with the literal prefix `ast-grep-walk:` (a v2-wave source whose `_source` rows are not backed by a single file on disk; see the Content Hashing section's third rule), the filesystem check is meaningless. Instead, extract the module name (everything after the colon) and query whether its Module node still exists:
 
    ```
-   python3 scripts/graph/kuzu_client.py query \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
      "MATCH (m:Module {name: $name}) RETURN count(m) AS c" \
      --params-json '{"name": "<module-name>"}'
    ```
@@ -630,7 +630,7 @@ Run two Cypher statements in sequence via `kuzu_client.py`. These are two separa
 1. **First statement — remove all nodes owned by `fp` (and their attached edges via `DETACH DELETE`):**
 
    ```
-   python3 scripts/graph/kuzu_client.py query \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
      "MATCH (n) WHERE n.source_file = $fp DETACH DELETE n" \
      --params-json '{"fp": "<fp>"}'
    ```
@@ -640,7 +640,7 @@ Run two Cypher statements in sequence via `kuzu_client.py`. These are two separa
 2. **Second statement — remove the `_source` bookkeeping row:**
 
    ```
-   python3 scripts/graph/kuzu_client.py query \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
      "MATCH (s:_source {file_path: $fp}) DELETE s" \
      --params-json '{"fp": "<fp>"}'
    ```
@@ -737,7 +737,7 @@ Procedure for a single file `<file_path>`:
 1. **Read the `_source` row** (if any) via `kuzu_client.py`:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (s:_source {file_path: $fp}) RETURN s.content_hash AS stored_hash, s.indexer_version AS stored_version" \
      --params-json '{"fp": "<file_path>"}'
    ```
@@ -766,12 +766,12 @@ Procedure for a single file `<file_path>`:
 
 **Step 5.3 — Execute full-replace for each file.**
 
-For each file that produced a record bundle in 5.2, perform the following three-phase full-replace via `scripts/graph/kuzu_client.py`. All three phases use the same `<file_path>` — the literal string the parser stamped into every node's `source_file` property.
+For each file that produced a record bundle in 5.2, perform the following three-phase full-replace via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. All three phases use the same `<file_path>` — the literal string the parser stamped into every node's `source_file` property.
 
 **Phase A: DELETE all prior nodes owned by this file.**
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (n) WHERE n.source_file = $sf DETACH DELETE n" \
   --params-json '{"sf": "<file_path>"}'
 ```
@@ -783,7 +783,7 @@ python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
 For every node record in the bundle, run one parameterized CREATE. The exact label and column set come from the parser's `type` and `properties` fields, which the Parsers section pins to the DDL column names in Step 3. Generic template:
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "CREATE (n:<NodeType> {id: $id, subject: $subject, status: $status, ...})" \
   --params-json '<json of properties>'
 ```
@@ -804,7 +804,7 @@ Loop simplicity over bulk performance is the v1 stance — one `kuzu_client.py q
 For every edge record in the bundle, MATCH the two endpoint nodes by primary key and CREATE the rel. Template:
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (a:<FromType> {<pk>: $fromId}), (b:<ToType> {<pk>: $toId}) CREATE (a)-[:<REL>]->(b)" \
   --params-json '{"fromId": <from_key>, "toId": <to_key>}'
 ```
@@ -849,7 +849,7 @@ After Phase A, B, and C have all completed without a Cypher error for a given fi
 **Cypher — primary form (MERGE):**
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MERGE (s:_source {file_path: $fp})
      ON CREATE SET s.content_hash = $h, s.last_indexed_at = CAST($ts AS TIMESTAMP), s.node_count = $nc, s.edge_count = $ec, s.indexer_version = $v
      ON MATCH  SET s.content_hash = $h, s.last_indexed_at = CAST($ts AS TIMESTAMP), s.node_count = $nc, s.edge_count = $ec, s.indexer_version = $v" \
@@ -864,12 +864,12 @@ The ON CREATE and ON MATCH clauses apply the same SET list — this is intention
 
 ```
 # Step 1: delete any existing row (no-op if none)
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (s:_source {file_path: $fp}) DELETE s" \
   --params-json '{"fp": "<file_path>"}'
 
 # Step 2: insert the fresh row
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "CREATE (s:_source {file_path: $fp, content_hash: $h, last_indexed_at: CAST($ts AS TIMESTAMP), node_count: $nc, edge_count: $ec, indexer_version: $v})" \
   --params-json '{"fp": "<file_path>", "h": "<64-hex>", "ts": "2026-04-18T14:30:00.000Z", "nc": <int>, "ec": <int>, "v": "<semver>"}'
 ```
@@ -890,7 +890,7 @@ A `_source` upsert failure is strictly a data-layer failure, not a structural on
 
 **Step 5.4 — Code-graph pass (per-module).**
 
-This substep walks each Module's source tree with `scripts/graph/astgrep_walker.py`, extracts File / Symbol / REFERENCES records, and upserts them into the graph. It is the write-side counterpart to the Symbol (design doc line 206) and REFERENCES (design doc line 335) schema — Step 5.3 does not produce Symbol or REFERENCES rows, Step 5.4 does. It runs AFTER every JSON-sourced file has been full-replaced by Step 5.3 (so Module nodes from `discovery.json` are present in the graph) and BEFORE Step 5.5's CONTAINS finalization pass (so Symbol / REFERENCES rows exist when CONTAINS is resolved).
+This substep walks each Module's source tree with `${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py`, extracts File / Symbol / REFERENCES records, and upserts them into the graph. It is the write-side counterpart to the Symbol (design doc line 206) and REFERENCES (design doc line 335) schema — Step 5.3 does not produce Symbol or REFERENCES rows, Step 5.4 does. It runs AFTER every JSON-sourced file has been full-replaced by Step 5.3 (so Module nodes from `discovery.json` are present in the graph) and BEFORE Step 5.5's CONTAINS finalization pass (so Symbol / REFERENCES rows exist when CONTAINS is resolved).
 
 **Invocation trigger.** This substep runs when ANY of the following is true:
 
@@ -912,7 +912,7 @@ For each `(module_name, module_path)` in the set, before invoking the walker:
 1. Run the walker to obtain the File / Symbol / REFERENCES records for the module:
 
    ```
-   python3 scripts/graph/astgrep_walker.py --module <module_name> --module-path <abs module path>
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py --module <module_name> --module-path <abs module path>
    ```
 
    Expect exit 0 and a single top-level JSON object on stdout with the shape `{"module": "<name>", "module_path": "<abs>", "walked_at": "<iso8601>", "files": [...], "symbols": [...], "references": [...]}`. On exit 1 (argument or parse error) or exit 2 (ast-grep binary missing), capture stderr, append `"code-graph walker failed for <module_name>: <stderr one-liner>"` to the pass-level `warnings` list, record the module in `files_failed` under the pseudo-path `ast-grep-walk:<module_name>`, and continue to the next module. Do NOT mutate the graph for that module.
@@ -922,7 +922,7 @@ For each `(module_name, module_path)` in the set, before invoking the walker:
 3. Read the stored composite hash from `_source` for the row `ast-grep-walk:<module_name>`:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (s:_source {file_path: $fp}) RETURN s.content_hash AS stored_hash, s.indexer_version AS stored_version" \
      --params-json '{"fp": "ast-grep-walk:<module_name>"}'
    ```
@@ -935,12 +935,12 @@ For each `(module_name, module_path)` in the set, before invoking the walker:
 
 **Phase 3 — DELETE-then-INSERT (per-module full-replace).**
 
-The per-module full-replace runs three Cypher statements in sequence via `scripts/graph/kuzu_client.py`, each its own Option B auto-commit transaction (same model as Step 5.3, see Step 5.6 for rationale). Every statement scopes strictly to `source_file = 'ast-grep-walk'` AND the module name — no statement in Phase 3 touches rows owned by any other source or any other module. Full-replace at the per-module boundary matches the design doc's "Upsert strategy: Full-replace per source file (not merge) — DELETE derived nodes for that file, re-insert, in one transaction" rule (see `docs/plans/2026-04-graph-engine-v1.md` upsert protocol at line 416 and the module-level phrasing in the Symbol lifecycle at line 229).
+The per-module full-replace runs three Cypher statements in sequence via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`, each its own Option B auto-commit transaction (same model as Step 5.3, see Step 5.6 for rationale). Every statement scopes strictly to `source_file = 'ast-grep-walk'` AND the module name — no statement in Phase 3 touches rows owned by any other source or any other module. Full-replace at the per-module boundary matches the design doc's "Upsert strategy: Full-replace per source file (not merge) — DELETE derived nodes for that file, re-insert, in one transaction" rule (see `docs/plans/2026-04-graph-engine-v1.md` upsert protocol at line 416 and the module-level phrasing in the Symbol lifecycle at line 229).
 
 1. **DELETE REFERENCES owned by this module.** REFERENCES is deleted first so the cascade of symbol ids remains resolvable for observability even though `DETACH DELETE` on the next step would also drop them.
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (f:File {module: $name, source_file: 'ast-grep-walk'})-[r:REFERENCES]->(:Symbol) DELETE r" \
      --params-json '{"name": "<module_name>"}'
    ```
@@ -948,7 +948,7 @@ The per-module full-replace runs three Cypher statements in sequence via `script
 2. **DELETE Symbol nodes owned by this module.**
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (s:Symbol {module: $name, source_file: 'ast-grep-walk'}) DETACH DELETE s" \
      --params-json '{"name": "<module_name>"}'
    ```
@@ -956,7 +956,7 @@ The per-module full-replace runs three Cypher statements in sequence via `script
 3. **DELETE File nodes owned by this module WHERE source_file = 'ast-grep-walk'.** This leaves any discovery-sourced File rows (`source_file = '.cc-master/discovery.json'`) alone — the two `source_file` values never collide because the design doc's File lifecycle rules (lines 200-203) partition File nodes by which indexer path produced them.
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (f:File {module: $name, source_file: 'ast-grep-walk'}) DETACH DELETE f" \
      --params-json '{"name": "<module_name>"}'
    ```
@@ -964,17 +964,17 @@ The per-module full-replace runs three Cypher statements in sequence via `script
 4. **INSERT File rows** from the walker's `files` array. Iterate the array; for each entry, run:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "CREATE (f:File {path: $path, module: $module, language: $language, content_hash: $content_hash, size: $size, is_test: $is_test, last_indexed: CAST($last_indexed AS TIMESTAMP), source_file: 'ast-grep-walk'})" \
      --params-json '<walker file record>'
    ```
 
-   `size` may be null in the walker output for files whose size was not captured; bind it as JSON `null` and Kuzu stores NULL per the File schema (see design doc line 189). As of task #81, `File.is_test` is populated by the `classify_test_file()` function in `scripts/graph/astgrep_walker.py`, which mirrors the rules in `prompts/test-file-definition.md` (the canonical source shared with the build skill's production-quality scan) — the walker emits a real boolean per file, so `$is_test` is bound from the walker record verbatim and never defaulted to `false`.
+   `size` may be null in the walker output for files whose size was not captured; bind it as JSON `null` and Kuzu stores NULL per the File schema (see design doc line 189). As of task #81, `File.is_test` is populated by the `classify_test_file()` function in `${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py`, which mirrors the rules in `prompts/test-file-definition.md` (the canonical source shared with the build skill's production-quality scan) — the walker emits a real boolean per file, so `$is_test` is bound from the walker record verbatim and never defaulted to `false`.
 
 5. **INSERT Symbol rows** from the walker's `symbols` array. Iterate; for each entry:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "CREATE (s:Symbol {id: $id, name: $name, kind: $kind, file: $file, line: $line, module: $module, source_file: 'ast-grep-walk', last_indexed: CAST($last_indexed AS TIMESTAMP)})" \
      --params-json '<walker symbol record with last_indexed = walker output walked_at>'
    ```
@@ -984,7 +984,7 @@ The per-module full-replace runs three Cypher statements in sequence via `script
 6. **INSERT REFERENCES edges** from the walker's `references` array. Walker entries that resolved to a same-module Symbol carry a non-null `symbol_id`; entries that did not resolve carry `symbol_id: null` and are silently dropped per the no-dangling-edges rule (Parsers preamble). For each entry with a non-null `symbol_id`, MATCH both endpoint nodes by their primary keys and CREATE the rel:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (f:File {path: $file, source_file: 'ast-grep-walk'}), (s:Symbol {id: $symbol_id}) CREATE (f)-[:REFERENCES {line: $line, context: $context, kind: $kind, source_file: 'ast-grep-walk'}]->(s)" \
      --params-json '{"file": "<path>", "symbol_id": "<sha-16>", "line": <int>, "context": "<trimmed source>", "kind": "<call|import|type_ref>"}'
    ```
@@ -1004,7 +1004,7 @@ This is the one documented exception to Phase 3's DELETE-then-INSERT contract, s
 If all three hold, the only change this pass can express is a `File.content_hash` update on one or more Files whose bodies churned without altering their declared symbols or reference sites. In that narrow case, **SKIP Phase 3 entirely** and instead run one UPDATE per affected File:
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
   "MATCH (f:File {path: $path, source_file: 'ast-grep-walk'}) SET f.content_hash = $content_hash, f.size = $size, f.last_indexed = CAST($last_indexed AS TIMESTAMP), f.language = $language" \
   --params-json '<walker file record>'
 ```
@@ -1048,7 +1048,7 @@ ast-grep is a structural (tree-sitter) matcher, not a type-aware resolver. The v
 Accepted v1 tradeoff to ship the indexer on a single binary with zero per-language setup. Trigger criteria for the v0.22 SCIP swap-in (documented in `docs/plans/2026-04-graph-engine-v1.md` "NOT in v1" → "Deferred to v0.22" → first bullet "Symbol nodes with dynamic-dispatch resolution / cross-module call closure"):
 
 1. A user reports missing call-edges that materially affect `/cc-master:impact` correctness — specifically, a changed symbol whose real callers are not surfaced by the impact query.
-2. ast-grep's output format breaks in a way that makes parsing fragile beyond the walker's current `scripts/graph/astgrep_walker.py` coverage.
+2. ast-grep's output format breaks in a way that makes parsing fragile beyond the walker's current `${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py` coverage.
 3. SCIP install UX improves to the point where "one command per language" becomes acceptable operator setup.
 
 Any one of those conditions opens the v0.22 SCIP indexer swap-in task. The graph schema (Module, File, Symbol, REFERENCES) is stable across the swap; only the indexer binary changes. Until that trigger fires, `/cc-master:impact` and other graph readers account for this limitation by falling back to conservative approximations (e.g., module-level impact, string-grep on dynamic-dispatch suspects) rather than claiming completeness.
@@ -1062,7 +1062,7 @@ Procedure:
 1. Load every Module's `name` and `path` from the graph:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (m:Module) RETURN m.name AS name, m.path AS path"
    ```
 
@@ -1073,7 +1073,7 @@ Procedure:
    a. First, DELETE existing CONTAINS edges rooted at this module. This prevents duplication when the skill re-runs on an already-populated graph:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (m:Module {name: $name})-[r:CONTAINS]->(:File) DELETE r" \
      --params-json '{"name": "<module name>"}'
    ```
@@ -1081,7 +1081,7 @@ Procedure:
    b. Then CREATE CONTAINS edges to every File whose `path` starts with this Module's `path` AND has not already been assigned to a deeper module in this pass. Track assigned File paths in a local set that accumulates across iterations. Query:
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (m:Module {name: $name}), (f:File) WHERE f.path STARTS WITH $path AND NOT f.path IN $already_assigned CREATE (m)-[:CONTAINS]->(f) RETURN f.path AS claimed" \
      --params-json '{"name": "<module name>", "path": "<module path>", "already_assigned": [<paths already claimed>]}'
    ```
@@ -1094,7 +1094,7 @@ The CONTAINS finalization pass is NOT counted against a specific source file in 
 
 **Step 5.6 — Transaction semantics (Option B).**
 
-`scripts/graph/kuzu_client.py` opens a fresh `kuzu.Database` and `kuzu.Connection` on every `query` invocation and closes them when the Python process exits. Its `cmd_query` function passes a single Cypher string to `conn.execute(...)` and does not wrap the call in any `BEGIN TRANSACTION` / `COMMIT` block. This means **Option A (multi-statement transaction in one CLI call) is NOT available through the current wrapper** — the wrapper's contract is one statement per invocation. A true cross-statement transaction would require either (a) extending the wrapper to accept a multi-statement script and manage BEGIN/COMMIT itself, or (b) holding a persistent connection across many invocations, neither of which is in scope for this subtask.
+`${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` opens a fresh `kuzu.Database` and `kuzu.Connection` on every `query` invocation and closes them when the Python process exits. Its `cmd_query` function passes a single Cypher string to `conn.execute(...)` and does not wrap the call in any `BEGIN TRANSACTION` / `COMMIT` block. This means **Option A (multi-statement transaction in one CLI call) is NOT available through the current wrapper** — the wrapper's contract is one statement per invocation. A true cross-statement transaction would require either (a) extending the wrapper to accept a multi-statement script and manage BEGIN/COMMIT itself, or (b) holding a persistent connection across many invocations, neither of which is in scope for this subtask.
 
 This skill therefore uses **Option B**: each individual CREATE or DELETE statement executes as its own atomic Kuzu transaction (Kuzu auto-commits single statements), but the overall per-file upsert sequence (DELETE, N×CREATE nodes, M×CREATE edges) is NOT enclosed in a single transaction. If the process is interrupted mid-file — say, a Cypher error on the 5th node CREATE after the DELETE and first 4 CREATEs already landed — the graph is left with a partial upsert for that file. On the next `cc-master:index` run, the partial state is fully replaced (DELETE by source_file catches every dangling row from the prior attempt), so the damage is self-healing and bounded to one pass.
 
@@ -1152,17 +1152,17 @@ This step renders the end-of-pass summary line and releases the Kuzu OS-level lo
 
 **Step 6.1 — Collect counts from the graph.**
 
-Issue each of the following count queries via `scripts/graph/kuzu_client.py query`. Every query returns a single row with a single integer column; read that value into a local variable.
+Issue each of the following count queries via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query`. Every query returns a single row with a single integer column; read that value into a local variable.
 
 ```
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) RETURN count(t) AS tasks"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (st:Subtask) RETURN count(st) AS subtasks"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Spec) RETURN count(s) AS specs"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:Feature) RETURN count(f) AS features"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module) RETURN count(m) AS modules"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (fi:File) RETURN count(fi) AS files"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (sy:Symbol) RETURN count(sy) AS symbols"
-python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH ()-[r:REFERENCES]->() RETURN count(r) AS references_count"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) RETURN count(t) AS tasks"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (st:Subtask) RETURN count(st) AS subtasks"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Spec) RETURN count(s) AS specs"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:Feature) RETURN count(f) AS features"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module) RETURN count(m) AS modules"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (fi:File) RETURN count(fi) AS files"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (sy:Symbol) RETURN count(sy) AS symbols"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH ()-[r:REFERENCES]->() RETURN count(r) AS references_count"
 ```
 
 The last two queries surface the Step 5.4 code-graph pass's output. On projects that never invoke the code-graph pass (no `--code-graph`, no `--full`, no `--module <name>`), both counts are `0` and the corresponding segments of the summary line below render as `0 symbols, 0 references` — zero is not a failure signal, it just reflects that the code-graph layer has not been populated on this project.
@@ -1237,7 +1237,7 @@ FAILED: <N> files — <comma-separated list of file paths>
 Before exiting, release the Kuzu OS-level lock by explicitly closing the database so subsequent `cc-master:*` invocations can open it cleanly:
 
 ```
-python3 scripts/graph/kuzu_client.py close .cc-master/graph.kuzu
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py close .cc-master/graph.kuzu
 ```
 
 This is the last filesystem action the skill performs. Do not issue any further queries after `close`. If the close call itself exits non-zero, print the stderr JSON verbatim prefixed with `"Kuzu close failed: "` and exit non-zero — a lingering lock is a real problem for downstream skills that depend on reading the graph immediately after index finishes.
@@ -1293,12 +1293,12 @@ Interpret the exit code:
 
 **Substep T.2 — MISSING branch: single-file absence handling.**
 
-This branch runs the same two-statement deletion used by Step 4.3, but scoped to a single file path (`touch_target`) and without enumerating `_source`. Execute both statements in sequence via `scripts/graph/kuzu_client.py query`:
+This branch runs the same two-statement deletion used by Step 4.3, but scoped to a single file path (`touch_target`) and without enumerating `_source`. Execute both statements in sequence via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query`:
 
 1. **Delete the file's nodes** (DETACH DELETE removes the nodes and cascades attached edges):
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (n) WHERE n.source_file = $fp DETACH DELETE n" \
      --params-json '{"fp": "<touch_target>"}'
    ```
@@ -1308,7 +1308,7 @@ This branch runs the same two-statement deletion used by Step 4.3, but scoped to
 2. **Delete the `_source` bookkeeping row:**
 
    ```
-   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
      "MATCH (s:_source {file_path: $fp}) DELETE s" \
      --params-json '{"fp": "<touch_target>"}'
    ```
@@ -1372,7 +1372,7 @@ Where `<error text>` is the stderr text recorded at the point of failure (from S
 
 **Substep T.5 — Close the Kuzu database.**
 
-Execute Step 6.6 verbatim — `python3 scripts/graph/kuzu_client.py close .cc-master/graph.kuzu`. The same error-handling contract from Step 6.6 applies: if `close` exits non-zero, print the stderr JSON prefixed with `"Kuzu close failed: "` and exit non-zero (exit code `3`, per the **Substep T.6** table — a close failure is a Kuzu database-path issue, not a Cypher error).
+Execute Step 6.6 verbatim — `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py close .cc-master/graph.kuzu`. The same error-handling contract from Step 6.6 applies: if `close` exits non-zero, print the stderr JSON prefixed with `"Kuzu close failed: "` and exit non-zero (exit code `3`, per the **Substep T.6** table — a close failure is a Kuzu database-path issue, not a Cypher error).
 
 **Substep T.6 — Exit codes.**
 

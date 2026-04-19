@@ -45,7 +45,7 @@ First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run 
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
 Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading

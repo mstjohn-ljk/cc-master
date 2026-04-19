@@ -160,7 +160,7 @@ First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run 
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
-Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
 Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
@@ -175,7 +175,7 @@ started — retries mask real corruption and waste tokens.
 
 1. **Check 1 — `test -e .cc-master/graph.kuzu`.** If the path does not exist or is unreadable by the current process, set the top-level output to `{"status": "no-graph-data", "reason": "graph.kuzu not found"}` and SKIP the per-file loop entirely.
 2. **Check 2 — `_source` hash audit.** For every file in the diff set whose path corresponds to an entry in the graph's `_source` table, query `MATCH (s:_source {file_path: $path}) RETURN s.content_hash AS stored` and compare against the canonical on-disk hash (algorithm per file type as documented in `prompts/graph-read-protocol.md` section `## Hash Comparison Rule`). If EVERY dependent `_source` row is either missing or mismatched, set `{"status": "no-graph-data", "reason": "all dependent _source hashes stale or absent"}` and SKIP the per-file loop.
-3. **Check 3 — kuzu_client smoke test.** Run one trivial Cypher read (e.g., `MATCH (s:_source) RETURN count(s) AS n LIMIT 1`) via `scripts/graph/kuzu_client.py`. On non-zero exit code or non-empty stderr, capture the first line of stderr as `<stderr first line>` and set `{"status": "no-graph-data", "reason": "Cypher error: <stderr first line>"}` and SKIP the per-file loop.
+3. **Check 3 — kuzu_client smoke test.** Run one trivial Cypher read (e.g., `MATCH (s:_source) RETURN count(s) AS n LIMIT 1`) via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. On non-zero exit code or non-empty stderr, capture the first line of stderr as `<stderr first line>` and set `{"status": "no-graph-data", "reason": "Cypher error: <stderr first line>"}` and SKIP the per-file loop.
 
 Rationale: if the graph is missing or globally unusable, there is no point invoking `cc-master:impact` 50 times to collect 50 identical graph-absent diagnostics. One check, one short-circuit. Step 6 (subtask #95) will render the fallback line from the top-level `status` field.
 
