@@ -23,8 +23,9 @@ Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 These rules apply to ALL argument parsing and filesystem handling across this skill:
 
 - **Path containment:** Any file path this skill handles (source artifact, spec file, Kuzu directory, `--touch` target) MUST resolve inside the project root. Before comparing, normalize the path with a `realpath`-equivalent call so `..` traversals, trailing slashes, and symlinks collapse first. Reject absolute paths that resolve outside the project root. Reject any path containing a null byte (`\0`) or non-printable character. Reject any `..` segment that survives normalization with: `"Path escapes project root — rejected."`
-- **Module name:** A `--module <name>` value must match `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,60}[A-Za-z0-9]$`. Reject values containing shell metacharacters (`$`, `` ` ``, `|`, `;`, `&&`, `||`, `>`, `<`, `*`, `?`, `(`, `)`, `{`, `}`, `[`, `]`, quotes, whitespace), path separators (`/`, `\`), null bytes, or non-printable characters. After regex validation, confirm the module name EXISTS in `discovery.json`'s `modules[].name` list — load discovery.json, collect the set of module names, and if `<name>` is not a member, reject with: `"Module '<name>' not found in discovery.json. Available modules: <comma-list>."` If `discovery.json` does not exist on disk, reject `--module` with: `"Module '<name>' cannot be validated — .cc-master/discovery.json not found. Run cc-master:discover first."`
-- **Recognized flags:** `--full`, `--module <name>`, `--touch <file>`. No other flags are accepted. Any unrecognized flag is rejected per the Step 1 error text — never silently ignored.
+- **Module name:** A `--module <name>` value must match `^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$`. The first character MUST be alphanumeric (no leading dot, dash, underscore, or slash); the remainder may contain alphanumerics, underscores, dots, hyphens, and forward slashes; total length MUST be between 1 and 101 characters. Path-style module names (e.g., `skills/index`, `scripts/graph`) are legal because the repo's Module nodes frequently mirror directory paths. Reject values containing shell metacharacters (`$`, `` ` ``, `|`, `;`, `&&`, `||`, `>`, `<`, `*`, `?`, `(`, `)`, `{`, `}`, `[`, `]`, quotes, whitespace, `\`), null bytes, or non-printable characters. On regex failure, reject with: `"Invalid --module value '<name>'. Must match ^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$."` and exit 1. After regex validation, confirm the module name EXISTS as a Module node in the graph OR is present in `discovery.json`'s `modules[].name` array — the skill first tries the graph (one `MATCH (m:Module {name: $name}) RETURN m.name` query via `kuzu_client.py`) and, on empty result or graph absence, falls back to parsing `.cc-master/discovery.json` and scanning `modules[].name`. If neither source records the module, reject with: `"Module '<name>' not found in discovery.json or graph. Run /cc-master:discover --update first or choose an existing module."` and exit 3.
+- **`--code-graph` flag:** Presence-only flag (no value). Validation: `.cc-master/discovery.json` MUST exist on disk — without it, Step 5.4 has no Module set to walk and the pass would be a silent no-op. If `discovery.json` is absent, reject with: `"No discovery.json — run /cc-master:discover first."` and exit 3. If the file exists but is malformed JSON or lacks a `modules` array, the pass still proceeds; Step 5.4's Phase 1 surfaces the shape error via its own warning mechanism.
+- **Recognized flags:** `--full`, `--module <name>`, `--code-graph`, `--touch <file>`. No other flags are accepted. Any unrecognized flag is rejected per the Step 1 error text — never silently ignored.
 - **`--touch <file>`:** value must be a valid file path that refers to one of the tracked source files this indexer parses. The full validation suite (applied in Step 1.5b before any Kuzu interaction) is:
     - Reject `..` segments in the ORIGINAL input string (belt-and-suspenders alongside the realpath check).
     - Reject null bytes (`\x00`) or percent-encoded null (`%00`) anywhere in the input.
@@ -161,9 +162,9 @@ Two cross-parser rules apply everywhere below:
    - `path` ← `fe.path`
    - `module` ← `m.name` when the entry came from a module's `files[]`, else the entry's own `module` field (may be null)
    - `language` ← `fe.language` if present, else null
-   - `content_hash` ← empty string `""` for v1 (the ast-grep-walk source in wave 6 populates this; discovery-sourced Files deliberately leave it blank so the hash-diff logic can distinguish "not yet walked" from "walked and clean")
+   - `content_hash` ← empty string `""` for discovery-sourced Files (the `ast-grep-walk` source in Step 5.4 populates this with a real SHA-256; discovery-sourced Files deliberately leave it blank so the hash-diff logic can distinguish "not yet walked" from "walked and clean")
    - `size` ← `fe.size` if present, else null
-   - `is_test` ← `false` for v1 (wave 6 refines this with classification rules)
+   - `is_test` ← `false` for discovery-sourced Files (the ast-grep walker applies classification rules on its own side; discovery does not try to guess test status)
    - `last_indexed` ← current timestamp at parse time (ISO-8601)
    - `source_file` ← `.cc-master/discovery.json`
 5. **No CONTAINS edges are emitted here.** Per the design doc, CONTAINS is computed in a finalization step during upsert (Step 5) via longest-prefix match of `Module.path` against `File.path`. This parser returns only nodes; edge derivation is explicitly deferred.
@@ -255,7 +256,7 @@ Applies ONLY to `_source` entries whose `file_path` column begins with the pseud
 
 Algorithm:
 
-1. Enumerate every file belonging to the module (in v2 this comes from the Module's CONTAINS-linked File nodes, in wave 6).
+1. Enumerate every file belonging to the module — the `files` array from `scripts/graph/astgrep_walker.py`'s stdout (Step 5.4 Phase 2), which already carries each file's `content_hash`. (Outside Step 5.4, the same list can be derived from the Module's CONTAINS-linked File nodes where `source_file = 'ast-grep-walk'`, though Step 5.4 itself avoids that query by reusing the walker output.)
 2. For each file, compute its raw byte SHA-256 (same as the markdown rule — no normalization).
 3. Build a sorted list of strings of the form `"<file_path>:<file_content_hash>"` (sort by file_path, ASCII order).
 4. Join the sorted list with newline (`\n`) separators.
@@ -263,7 +264,7 @@ Algorithm:
 
 Rationale: detects file additions, deletions, and content changes anywhere inside a module with a single composite digest — the indexer does NOT have to enumerate per-file _source rows for the module's interior. Adding a file changes the sorted list. Deleting a file changes the sorted list. Editing a file changes one line of the sorted list.
 
-NOT implemented by the current skill — wave 6 wires this in. Documented here so the hash function is unified across v1 and v2, and so the v1 author does not accidentally conflict with the v2 shape of the same function.
+Consumed by Step 5.4 (code-graph pass, per-module) — Phase 2's per-module hash-compare reuses this function verbatim against the `ast-grep-walk:<module-name>` pseudo-path row in `_source`. The walker at `scripts/graph/astgrep_walker.py` already captures each file's `content_hash` in its output, so Step 5.4 does not re-hash disk bytes — it feeds the walker's File records into the sort-join-SHA256 composition above.
 
 ### Race safety: read bytes once, hash the bytes, parse the bytes
 
@@ -275,7 +276,7 @@ Concretely for the skill-executor:
 
 - For JSON files: the one-liner above opens the file, `json.load` consumes it once, then `json.dumps` re-serializes the parsed object in memory. The hash is computed from the re-serialized string, not from a second disk read. The parser then receives either the already-loaded in-memory dict (preferred) or a fresh `json.load` of the same bytes (acceptable only if the bytes are captured to a variable first and both calls use that variable). Never issue two independent `open(path).read()` calls.
 - For markdown specs: read the bytes into a local variable (`bytes_ = open(path, 'rb').read()`), hash `bytes_`, then pass `bytes_` to the specs parser's text-decode step. The parser does not re-open the file.
-- For code-graph module walks (wave 6): each underlying file is read once; the per-file hashes are captured in memory before the composite hash is computed. The underlying ast-grep walk uses the same bytes.
+- For code-graph module walks (Step 5.4): `scripts/graph/astgrep_walker.py` reads each underlying file once (`_hash_file` in the walker), captures the SHA-256 in the walker output's `files[].content_hash` field, and the same bytes feed the walker's pattern-matching pass. The composite module hash is computed in-process by Step 5.4 from the walker output — no re-read of disk bytes inside the indexer.
 
 If the file is modified mid-pass despite this discipline (e.g., another process writes while Python holds the fd open), the behavior is defined by the OS filesystem semantics — on POSIX the in-memory bytes reflect a consistent snapshot of what was on disk at read time, and the mutation is picked up on the NEXT indexing pass. That is acceptable and expected.
 
@@ -292,7 +293,7 @@ On hash failure:
 
 Step 6's summary output appends `"(hash_errors: <N>)"` to the summary line when the `hash_errors` counter is non-zero. If zero, the parenthetical is omitted (keeps the happy-path output clean).
 
-If the parser subsequently ALSO fails on the same file (e.g., the JSON file was corrupted and both hashing and parsing raise), Step 5.6's existing `files_failed` tracking takes over — the file is marked FAILED and the pass exits non-zero at the end. The hash-error counter and the files_failed list are independent; a file can appear in both, in either, or in neither.
+If the parser subsequently ALSO fails on the same file (e.g., the JSON file was corrupted and both hashing and parsing raise), Step 5.7's existing `files_failed` tracking takes over — the file is marked FAILED and the pass exits non-zero at the end. The hash-error counter and the files_failed list are independent; a file can appear in both, in either, or in neither.
 
 ### Return value contract
 
@@ -307,22 +308,37 @@ Callers (the hash-compare logic in Step 5.2b and Substep T.3) MUST check for `ha
 
 Record a wall-clock start timestamp as the very first action of this step (e.g., `start_ts = time.monotonic()` or equivalent). Step 6 consumes this timestamp to compute the duration line in the summary — capture it before any other work so the reported duration covers the full pass.
 
-`cc-master:index` accepts a small, fixed set of invocations:
+`cc-master:index` accepts a small, fixed set of invocations. The flag table below is the authoritative list; the "Flag precedence and interaction" subsection after the substeps documents exactly how the flags combine.
 
-- `cc-master:index` (no args) — the default pass: iterate the canonical file set described in Step 5.1 and upsert every source.
-- `cc-master:index --full` — forces re-index regardless of `_source.content_hash`. Bypasses the hash-compare skip in Step 5.2b so every file takes the full-replace path; `_source.last_indexed_at` and `_source.indexer_version` refresh on every row. Surfaces a `(--full: forced re-index)` prefix on the Step 6 summary line.
-- `cc-master:index --module <name>` — narrows the file set so only files owned by the named Module are re-indexed. Validate `<name>` per the Module name rule in `## Input Validation Rules` (regex first, then membership in `discovery.json`). Step 5.1 consumes the captured `module` value to filter the file set; see that step for the exact narrowing rules.
-- `cc-master:index --touch <file>` — single-file refresh. The flag is recognized, its value is validated per Substep 1.5b, and `touch_target` drives the dedicated execution path in `## --touch Single-File Refresh`. Steps 4 and 5 are skipped on the touch path — see that section for full semantics.
+| Flag | Value | Scope | Effect |
+|------|-------|-------|--------|
+| (none) | — | Default pass | Iterate the canonical JSON + specs file set described in Step 5.1 and upsert every source. Step 5.4 (code-graph walk) does NOT run. |
+| `--full` | (none) | Everything | Forces re-index regardless of `_source.content_hash`. Bypasses the hash-compare skip in Step 5.2b so every JSON-sourced file takes the full-replace path; `_source.last_indexed_at` and `_source.indexer_version` refresh on every row. ALSO implies `--code-graph`: Step 5.4 runs for every Module in `discovery.json`, and Step 5.4's Phase 2 hash-compare is bypassed module-by-module. Surfaces a `(--full: forced re-index)` prefix on the Step 6 summary line. |
+| `--module <name>` | module name | Narrowest | Runs ONLY the Step 5.4 code-graph walk for the named module. Does NOT re-parse `kanban.json`, `roadmap.json`, `discovery.json`, or specs — Steps 5.1–5.3 are skipped. Does NOT trigger CONTAINS re-resolution (the module already exists in the graph; CONTAINS is re-derived incrementally at the end of Step 5.5 for the single affected module). Validate `<name>` per the Module name rule in `## Input Validation Rules` (regex first, then graph-or-discovery membership). |
+| `--code-graph` | (none) | All modules | Runs the Step 5.4 code-graph walk for every Module in `discovery.json`. Does NOT re-parse `kanban.json`, `roadmap.json`, `discovery.json`, or specs — Steps 5.1–5.3 are skipped for JSON artifacts. The module-level hash-compare in Step 5.4 Phase 2 DOES apply (unlike `--full`), so unchanged modules are skipped. |
+| `--touch <file>` | path | Single file | Single-file refresh. The flag is recognized, its value is validated per Substep 1.5b, and `touch_target` drives the dedicated execution path in `## --touch Single-File Refresh`. Steps 4 and 5 are skipped on the touch path unless the target is a source code file (see Flag precedence subsection below). |
 
 **Substep 1.1 — Strip `--touch <file>` for downstream validation.** If `--touch` appears as a whole token, the very next token is its value. If `--touch` appears with no following value (end of argument list, or next token is another flag), reject with: `"--touch requires a value. Usage: cc-master:index --touch <file>."` On success, set in-memory `touch_target = "<value>"` and remove both tokens (`--touch` and its value) from the working argument string. The full validation of the value (null-byte + `..` pre-check, containment, archive-subdir, accepted-file-set, case-exactness, canonicalization) runs in Substep 1.5b after the mutual-exclusion check in 1.5 passes.
 
 **Substep 1.2 — Strip and remember `--full`.** If `--full` appears as a whole token in the argument list, set an in-memory flag `full = true` and remove that token from the working argument string. `--full` takes no value; if the next token in the argument list happens to be another flag, that is fine — do not consume it as a value.
 
-**Substep 1.3 — Strip and validate `--module <name>`.** If `--module` appears as a whole token, the very next token is its value. Apply the Module name rule from `## Input Validation Rules`: regex-match `^[A-Za-z0-9][A-Za-z0-9_.\-]{0,60}[A-Za-z0-9]$`, then verify the name exists in `discovery.json`'s `modules[].name` list. On regex failure, reject with: `"Invalid --module value '<name>'. Must match ^[A-Za-z0-9][A-Za-z0-9_.\-]{0,60}[A-Za-z0-9]$."` On missing-in-discovery failure, use the error text from the Input Validation Rules section. If `--module` appears with no following value (end of argument list, or next token is another flag), reject with: `"--module requires a value. Usage: cc-master:index --module <name>."` On success, set in-memory `module = "<name>"` and remove both tokens (`--module` and its value) from the working argument string.
+**Substep 1.3 — Strip and validate `--module <name>`.** If `--module` appears as a whole token, the very next token is its value. Apply the Module name rule from `## Input Validation Rules`: regex-match `^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$` (the skill MUST reject on regex failure with: `"Invalid --module value '<name>'. Must match ^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$."` and exit 1), then verify the module is known. Membership lookup order:
 
-**Substep 1.4 — Argument pre-validation (positional rejection).** After stripping `--full`, `--module <name>`, and `--touch <file>`, the remaining working argument string MUST be empty (whitespace-only counts as empty). If anything remains, reject with: `"cc-master:index accepts no positional arguments. Valid flags: --full, --module <name>, --touch <file>."`
+  1. Query the graph: `python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module {name: $name}) RETURN m.name AS name" --params-json '{"name": "<name>"}'`. If the query exits 0 with a non-empty row set, the module is known — skip step 2.
+  2. Fall back to `discovery.json`: if the graph query returned zero rows, or the graph is absent (exit 3 from `kuzu_client.py`), or any other non-zero exit, parse `.cc-master/discovery.json`, collect `modules[].name` into a set, and check membership.
 
-**Substep 1.5 — Mutual-exclusion check.** `--touch` is mutually exclusive with both `--full` and `--module`. If `--touch` was seen AND `--full` was seen, print `"--touch is mutually exclusive with --full and --module. Pick one."` and exit non-zero. If `--touch` was seen AND `--module` was seen, print the same error and exit non-zero. Do not silently prefer one flag over another — the user must pick exactly one scope.
+  If neither source records the module, reject with the exact error from `## Input Validation Rules`: `"Module '<name>' not found in discovery.json or graph. Run /cc-master:discover --update first or choose an existing module."` and exit 3. If `--module` appears with no following value (end of argument list, or next token is another flag), reject with: `"--module requires a value. Usage: cc-master:index --module <name>."` and exit 1. On success, set in-memory `module = "<name>"` and remove both tokens (`--module` and its value) from the working argument string.
+
+**Substep 1.3b — Strip and validate `--code-graph`.** If `--code-graph` appears as a whole token in the argument list, set an in-memory flag `code_graph = true` and remove that token. `--code-graph` takes no value; if the next token happens to be another flag, do not consume it. On success, verify the precondition from `## Input Validation Rules`: `.cc-master/discovery.json` MUST exist on disk. If the file is absent, reject with: `"No discovery.json — run /cc-master:discover first."` and exit 3. Existence is all this substep checks; malformed-JSON handling is deferred to Step 5.4's Phase 1.
+
+**Substep 1.4 — Argument pre-validation (positional rejection).** After stripping `--full`, `--module <name>`, `--code-graph`, and `--touch <file>`, the remaining working argument string MUST be empty (whitespace-only counts as empty). If anything remains, reject with: `"cc-master:index accepts no positional arguments. Valid flags: --full, --module <name>, --code-graph, --touch <file>."` and exit 1.
+
+**Substep 1.5 — Mutual-exclusion check.** The combinations below are evaluated AFTER substeps 1.1–1.3b have set their respective in-memory flags. Each rule below prints its quoted error verbatim and exits with the indicated code; the skill MUST NOT silently prefer one flag over another.
+
+  1. `--full` AND `--module <name>`: illegal. Reject with: `"--full and --module are mutually exclusive. Use one or the other."` and exit 1. (`--full` already forces a full-repo walk; `--module` narrows to a single module — the two contradict.)
+  2. `--touch <file>` AND any of `--full`, `--module`, or `--code-graph`: illegal. Reject with: `"--touch is mutually exclusive with --module, --code-graph, and --full."` and exit 1. `--touch` is a single-file refresh path; combining it with whole-pass flags is undefined.
+  3. `--full` AND `--code-graph`: redundant but LEGAL. Print the informational line `"--code-graph is implied by --full; no-op."` to stdout, leave `full = true` set, treat `code_graph` as already implied (downstream routing reads `full` first), and continue. The pass proceeds as `--full`.
+  4. `--module <name>` AND `--code-graph`: LEGAL but `--module` wins (narrower scope). Print the informational line `"--code-graph ignored because --module <name> was specified."` to stdout, substituting the actual module name, and clear the in-memory `code_graph` flag so downstream routing sees `module` as the sole narrowing signal.
 
 **Substep 1.5b — Validate `--touch <file>` path.** This substep runs ONLY if `touch_target` was set in Substep 1.1 and the mutual-exclusion check in 1.5 passed. It MUST complete before any Kuzu interaction — including before Step 2's `check_kuzu.sh` call — because argument validation always precedes side effects. Run these checks in order; any failure prints the quoted error message verbatim and exits non-zero without running any subsequent step.
 
@@ -349,9 +365,58 @@ Record a wall-clock start timestamp as the very first action of this step (e.g.,
 
   10. **Canonicalize for downstream.** On success, overwrite `touch_target` with `rel_path` (the project-root-relative form). Every downstream consumer — Step 5's file-set narrowing, Step 6's summary line — then sees `.cc-master/...` regardless of whether the user invoked with `./.cc-master/specs/3.md`, `/Users/.../project/.cc-master/specs/3.md`, or just `.cc-master/specs/3.md`.
 
-**Substep 1.6 — Unknown-flag rejection.** If the pre-validation step discovers a residual token that begins with `--`, it is an unrecognized flag. Reject with: `"Unknown flag '<flag>'. Valid flags: --full, --module <name>, --touch <file>."` Do not silently ignore — silent ignore of unknown flags is explicitly listed in `## What NOT To Do`.
+**Substep 1.6 — Unknown-flag rejection.** If the pre-validation step discovers a residual token that begins with `--`, it is an unrecognized flag. Reject with: `"Unknown flag '<flag>'. Valid flags: --full, --module <name>, --code-graph, --touch <file>."` and exit 1. Do not silently ignore — silent ignore of unknown flags is explicitly listed in `## What NOT To Do`.
 
-On successful argument parsing, proceed to Step 2. Carry the `full`, `module`, and `touch_target` values forward in memory: Step 5.1 consumes `module` to narrow the file set; Step 5.2b consumes `full` to bypass the hash-compare skip; Step 6 consumes `full` to prefix the summary line; `touch_target` (if set) dispatches to the `## --touch Single-File Refresh` section after Step 3.
+#### Flag precedence and interaction
+
+This subsection is the single source of truth for how the four accepted flags combine. Every combination the skill MUST handle is listed here; every combination not listed is either unreachable (already rejected by a substep above) or identical to one of the rows below.
+
+- **`--module <name>` is the NARROWEST scope.** When set (and the mutual-exclusion checks in Substep 1.5 have passed), the skill runs ONLY the Step 5.4 code-graph walk for `<name>`. Steps 5.1, 5.2, 5.3 (JSON artifact parsing + full-replace) are SKIPPED. The CONTAINS finalization in Step 5.5 re-derives only the single affected module's edges — the Module node is already present in the graph and is not re-upserted; CONTAINS is re-resolved incrementally at the end. `--module` is the right choice when a single module's source files churned but no kanban, roadmap, discovery, or spec changed.
+
+- **`--code-graph` runs the code-graph walk for EVERY Module in `discovery.json`.** Steps 5.1, 5.2, 5.3 are SKIPPED for JSON artifacts. Step 5.4 iterates every `(module_name, module_path)` tuple. Module-level hash-compare in Step 5.4 Phase 2 still applies — unchanged modules fast-path out. Use `--code-graph` after a large code-only sweep (e.g., a refactor that renamed symbols across every module) where re-parsing `kanban.json` et al. adds no value.
+
+- **`--full` implies BOTH the full JSON re-parse AND `--code-graph`.** JSON artifacts go through Steps 5.1–5.3 with Step 5.2b's hash-compare skip bypassed. Modules go through Step 5.4 with Phase 2's hash-compare skip ALSO bypassed (see Step 5.4 Phase 2 step 4 bullet — `--full` short-circuits the hash compare). Step 5.4 MUST run at the end of the default sequence: Step 5.3 → Step 5.4 → Step 5.5. Nothing else is equivalent to `--full`; in particular, `--code-graph` alone does NOT force hash bypass on modules, only `--full` does.
+
+- **`--touch <file>` targets a single file.** If `<file>` is a JSON artifact (`.cc-master/kanban.json`, `.cc-master/roadmap.json`, `.cc-master/discovery.json`) or a spec (`.cc-master/specs/<n>.md`), the behavior is unchanged from the `## --touch Single-File Refresh` section — Steps 4 and 5 are skipped in favor of the single-file path. If `<file>` resolves (via project-root-relative path-prefix match against `discovery.json`'s `modules[].path` entries) to a source code file under a known Module's path, the touch is equivalent to `--module <parent-module>`: only that module's Step 5.4 walk runs. This code-file branch is implemented by the `## --touch Single-File Refresh` section's dispatcher; the flag parser in Step 1 does NOT distinguish the two touch cases — it validates the path form only (Substep 1.5b) and forwards `touch_target` downstream. If `<file>` is under none of discovery's module paths (e.g., a `.md` file in `docs/` or a repo-root file outside every module), the touch path is a no-op — no graph mutation occurs and Step 6's summary reports `changed_count=0`.
+
+- **Combination outcomes** (each already enforced by Substep 1.5):
+  - `--full --module <name>`: illegal — rejected with `"--full and --module are mutually exclusive. Use one or the other."` exit 1.
+  - `--full --code-graph`: redundant — accepted, prints `"--code-graph is implied by --full; no-op."` and continues as `--full`.
+  - `--module <name> --code-graph`: `--module` wins — prints `"--code-graph ignored because --module <name> was specified."` and proceeds with `module` as the sole narrowing signal.
+  - `--touch <file>` + any of `--full`, `--module`, `--code-graph`: illegal — rejected with `"--touch is mutually exclusive with --module, --code-graph, and --full."` exit 1.
+
+#### Argument routing
+
+On successful argument parsing, the skill carries the following in-memory values forward: `full` (bool), `module` (string or null), `code_graph` (bool), `touch_target` (string or null). The downstream steps consume them as follows — this is the decision table Step 2 inherits:
+
+- **JSON passes (Steps 5.1–5.3) run** UNLESS `--module` is set OR `--code-graph` is set alone OR `--touch <file>` was validated and dispatched. Specifically:
+  - No flag, or `--full` alone, or `--full --code-graph` → JSON passes run for the full canonical file set.
+  - `--module <name>` → JSON passes DO NOT run.
+  - `--code-graph` (without `--full`) → JSON passes DO NOT run.
+  - `--touch <file>` → JSON passes DO NOT run; `## --touch Single-File Refresh` dispatches instead.
+- **Code-graph pass (Step 5.4) runs** when `--full` is set, OR `--code-graph` is set, OR `--module <name>` is set, OR `--touch <file>` resolves to a source code file under a known Module path. Specifically:
+  - `--full` → Step 5.4 runs for every Module, hash-compare bypassed.
+  - `--code-graph` (without `--full`) → Step 5.4 runs for every Module, hash-compare applies.
+  - `--module <name>` → Step 5.4 runs for that single Module.
+  - `--touch <code_file>` → Step 5.4 runs for the parent Module of `<code_file>`, routed through `## --touch Single-File Refresh`.
+  - No flag at all → Step 5.4 DOES NOT run (default pass is JSON only).
+- **CONTAINS finalization (Step 5.5) runs** whenever ANY node write occurred in this pass — i.e., whenever JSON passes ran OR Step 5.4 ran. On a no-op pass (all files skipped by hash-compare, no flags forcing work), Step 5.5 is still safe to run as a single MATCH query, but produces no new edges.
+
+Every accepted flag has at least one downstream consumer in this routing table; every combination the substeps accept is represented. If this table and the substeps ever diverge, the substeps' quoted error messages and `in-memory flag` mutations are authoritative.
+
+#### Example invocations
+
+- `/cc-master:index` — default pass. Re-index the canonical JSON artifacts (`kanban.json`, `roadmap.json`, `discovery.json`) and every `.cc-master/specs/<n>.md`. Step 5.4 DOES NOT run. Step 5.2b's hash-compare skip applies.
+- `/cc-master:index --full` — full re-index. Every JSON artifact, every spec, AND every Module's code-graph walk is re-run with hash-compare skips bypassed at every level. Surfaces the `(--full: forced re-index)` prefix on Step 6's summary line.
+- `/cc-master:index --code-graph` — code-graph only. JSON artifacts are left alone; every Module in `discovery.json` is walked by Step 5.4 with Phase 2's hash-compare applied (so unchanged modules fast-path out).
+- `/cc-master:index --module skills` — single module walk. The `skills` Module is walked via Step 5.4 only. Kanban, roadmap, discovery, and specs are not re-parsed. Regex accepts `skills` (alphanumeric leading char, within length bound); membership lookup succeeds via the graph if the module is already indexed, otherwise via `discovery.json`.
+- `/cc-master:index --module scripts/graph` — path-style module name. The regex `^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,100}$` accepts `scripts/graph` because `/` is allowed in the character class. Membership lookup follows the same graph-then-discovery fallback.
+- `/cc-master:index --touch .cc-master/kanban.json` — single-file refresh of the kanban artifact. Substep 1.5b validates the path form; the `## --touch Single-File Refresh` section handles the actual reparse. Step 5.4 does NOT run for this target (it is a JSON artifact, not a source code file).
+- `/cc-master:index --touch skills/build/SKILL.md` — touch on a markdown file. The file is NOT a cc-master JSON artifact and is NOT under any Module-tracked code path (skill markdown lives under `skills/` but is not language-typed in `discovery.json`'s module list for this repo), so Substep 1.5b REJECTS this invocation with `"--touch: path 'skills/build/SKILL.md' is not a tracked source file. Accepted: .cc-master/{kanban,roadmap,discovery}.json or .cc-master/specs/<n>.md."` and exit 1. Use `--module <name>` to re-walk a module whose markdown documentation lives inside it.
+- `/cc-master:index --full --module skills` — ILLEGAL. Rejected at Substep 1.5 with `"--full and --module are mutually exclusive. Use one or the other."` exit 1.
+- `/cc-master:index --full --code-graph` — redundant but accepted. Prints `"--code-graph is implied by --full; no-op."` and proceeds as `--full`.
+
+On successful argument parsing, proceed to Step 2. Carry `full`, `module`, `code_graph`, and `touch_target` forward in memory: Step 5.1 consumes `module` and `code_graph` to decide whether JSON passes run; Step 5.2b consumes `full` to bypass the hash-compare skip; Step 5.4's Phase 1 consumes `full`, `code_graph`, and `module` to determine the Module set and whether Phase 2's hash-compare is bypassed; Step 6 consumes `full` to prefix the summary line; `touch_target` (if set) dispatches to the `## --touch Single-File Refresh` section after Step 3.
 
 ### Step 2: Check Kuzu Availability
 
@@ -423,15 +488,19 @@ Every statement uses `IF NOT EXISTS`, making the step fully idempotent — re-ru
 4. `CREATE NODE TABLE IF NOT EXISTS Feature(id STRING, title STRING, priority STRING, status STRING, phase STRING, complexity STRING, impact STRING, delivered_at TIMESTAMP, source_file STRING, PRIMARY KEY (id))`
 5. `CREATE NODE TABLE IF NOT EXISTS Module(name STRING, path STRING, language STRING, file_count INT64, source_file STRING, PRIMARY KEY (name))`
 6. `CREATE NODE TABLE IF NOT EXISTS File(path STRING, module STRING, language STRING, content_hash STRING, size INT64, is_test BOOLEAN, last_indexed TIMESTAMP, source_file STRING, PRIMARY KEY (path))`
-7. `CREATE REL TABLE IF NOT EXISTS HAS_SUBTASK(FROM Task TO Subtask)`
-8. `CREATE REL TABLE IF NOT EXISTS HAS_SPEC(FROM Task TO Spec)`
-9. `CREATE REL TABLE IF NOT EXISTS BLOCKED_BY(FROM Task TO Task, FROM Task TO Subtask, FROM Subtask TO Task, FROM Subtask TO Subtask)`
-10. `CREATE REL TABLE IF NOT EXISTS IMPLEMENTS(FROM Task TO Feature)`
-11. `CREATE REL TABLE IF NOT EXISTS TOUCHES(FROM Spec TO Module, intent STRING)`
-12. `CREATE REL TABLE IF NOT EXISTS CONTAINS(FROM Module TO File)`
-13. `CREATE NODE TABLE IF NOT EXISTS _source(file_path STRING, content_hash STRING, last_indexed_at TIMESTAMP, node_count INT64, edge_count INT64, indexer_version STRING, PRIMARY KEY (file_path))`
+7. `CREATE NODE TABLE IF NOT EXISTS Symbol(id STRING, name STRING, kind STRING, file STRING, line INT64, module STRING, source_file STRING DEFAULT 'ast-grep-walk', last_indexed TIMESTAMP, PRIMARY KEY (id))`
+8. `CREATE REL TABLE IF NOT EXISTS HAS_SUBTASK(FROM Task TO Subtask)`
+9. `CREATE REL TABLE IF NOT EXISTS HAS_SPEC(FROM Task TO Spec)`
+10. `CREATE REL TABLE IF NOT EXISTS BLOCKED_BY(FROM Task TO Task, FROM Task TO Subtask, FROM Subtask TO Task, FROM Subtask TO Subtask)`
+11. `CREATE REL TABLE IF NOT EXISTS IMPLEMENTS(FROM Task TO Feature)`
+12. `CREATE REL TABLE IF NOT EXISTS TOUCHES(FROM Spec TO Module, intent STRING)`
+13. `CREATE REL TABLE IF NOT EXISTS CONTAINS(FROM Module TO File)`
+14. `CREATE REL TABLE IF NOT EXISTS REFERENCES(FROM File TO Symbol, line INT64, context STRING, kind STRING, source_file STRING DEFAULT 'ast-grep-walk')`
+15. `CREATE NODE TABLE IF NOT EXISTS _source(file_path STRING, content_hash STRING, last_indexed_at TIMESTAMP, node_count INT64, edge_count INT64, indexer_version STRING, PRIMARY KEY (file_path))`
 
-Statements 1-6 define the six v1 node tables (Task, Subtask, Spec, Feature, Module, File). Statements 7-12 define the six v1 edge tables. Statement 13 provisions the `_source` metadata table — the hash-diff bookkeeping surface that Step 4 (absence handling) and Step 5 (hash-compare skip and `_source` upsert) use to decide whether a source artifact has changed since the last index pass.
+Statements 1-7 define the seven v1 node tables (Task, Subtask, Spec, Feature, Module, File, Symbol). Statements 8-14 define the seven v1 edge tables (HAS_SUBTASK, HAS_SPEC, BLOCKED_BY, IMPLEMENTS, TOUCHES, CONTAINS, REFERENCES). Statement 15 provisions the `_source` metadata table — the hash-diff bookkeeping surface that Step 4 (absence handling) and Step 5 (hash-compare skip and `_source` upsert) use to decide whether a source artifact has changed since the last index pass.
+
+Statement 7 (Symbol) and statement 14 (REFERENCES) are the code-graph layer added in wave 6. Their column lists, types, primary key, and `source_file` defaults (`'ast-grep-walk'`) mirror the Symbol node and REFERENCES edge sections of `docs/plans/2026-04-graph-engine-v1.md` exactly (see "### Symbol" at line 206 and "### REFERENCES" at line 335 of the design doc). Both tables are created unconditionally at bootstrap even on projects that never invoke the code-graph pass — the DDL is cheap, `IF NOT EXISTS` is idempotent, and provisioning them at bootstrap keeps later `--code-graph` / `--full` invocations from needing a schema-migration detour. The `source_file DEFAULT 'ast-grep-walk'` clause is authoritative: every Symbol and every REFERENCES row written by Step 5.4 stamps that literal string so the absence-handling branch in Step 4.2 (pseudo-path `ast-grep-walk:<module-name>`) finds every row owned by the walker.
 
 On any non-zero exit from a `kuzu_client.py query` call, follow the contract table above. The offending statement is the one currently being executed — include it in the error output so the user (or the next skill iteration) can see exactly which DDL failed.
 
@@ -529,7 +598,7 @@ python3 scripts/graph/kuzu_client.py query \
   --params-json '{}'
 ```
 
-Capture the returned array of `{"fp": "<path>"}` records. If the query fails (non-zero exit — Kuzu error, graph corruption, etc.), log `"Absence enumeration failed: <error>. Skipping Step 4; deleted_count remains 0."`, append `"absence enumeration failed"` to the pass-level `warnings` list (defined in Step 5.6), and proceed to Step 5. Do NOT abort the pass — Step 5 can still do useful work on files that exist, and the next pass will re-attempt enumeration.
+Capture the returned array of `{"fp": "<path>"}` records. If the query fails (non-zero exit — Kuzu error, graph corruption, etc.), log `"Absence enumeration failed: <error>. Skipping Step 4; deleted_count remains 0."`, append `"absence enumeration failed"` to the pass-level `warnings` list (defined in Step 5.7), and proceed to Step 5. Do NOT abort the pass — Step 5 can still do useful work on files that exist, and the next pass will re-attempt enumeration.
 
 **Step 4.2 — For each returned `fp`, check existence and decide.**
 
@@ -552,7 +621,7 @@ Iterate the captured records one at a time. For each `fp`:
    - If `c == 0` → the Module is gone; treat `fp` as absent and proceed to Step 4.3.
    - If the query errors → treat as unknown state (same contract as the Bash exit-code fallthrough above): log, add a warning, skip.
 
-   v1 does not write `ast-grep-walk:*` rows — the ast-grep indexer arrives in wave 6 — so in practice this branch is unreachable for v1. It is specified here so Step 4 is correct the moment wave 6 lands without requiring an edit.
+   Wave 6 wires the ast-grep walker into Step 5.4; from that wave onward `_source` rows with the `ast-grep-walk:<module-name>` pseudo-path are written on every code-graph pass, and this branch is hit whenever the named Module is dropped from `discovery.json` between index runs.
 
 **Step 4.3 — Delete the absent file's nodes, then its `_source` row.**
 
@@ -578,7 +647,7 @@ Run two Cypher statements in sequence via `kuzu_client.py`. These are two separa
 
    On non-zero exit, log `"Absence delete (_source) failed for <fp>: <error>. Graph nodes removed but _source row remains; next pass will retry the _source delete."`, append `"absence _source-delete failed for <fp>"` to `warnings`, and continue. The re-query of `_source` at the start of the next pass will pick this row up again; Step 4.2's existence check will confirm the file is still absent; Step 4.3's first statement will find zero nodes (they're already gone) and return success (see the edge case below); Step 4.3's second statement will run again and — filesystem permitting — succeed. The system is self-healing across passes.
 
-3. **Increment `deleted_count`** (the Step 5.6 pass-level counter, initialized to `0`) by one for each `fp` that completed both statements successfully.
+3. **Increment `deleted_count`** (the Step 5.7 pass-level counter, initialized to `0`) by one for each `fp` that completed both statements successfully.
 
 4. **Log one line per successfully deleted file:**
 
@@ -598,7 +667,7 @@ On completion, Step 4 has left the graph free of orphan nodes, orphan edges, and
 
 This step is where the graph is actually written. Every source file is re-indexed as a full unit: DELETE all nodes owned by the file, then INSERT the parsed records from scratch. This is the "per-file full-replace upsert, never merge" invariant declared in `docs/plans/2026-04-graph-engine-v1.md` under "Upsert protocol" (starting at line 364) — read that section before editing this step. The design doc is authoritative if it and this skill ever diverge.
 
-The `File UPDATE-in-place exception` described in the design doc (line 415) applies only to File nodes whose `source_file = 'ast-grep-walk'`, which come in wave 6. v1 does NOT implement that exception — every source listed below uses full-replace without exception.
+The `File UPDATE-in-place exception` described in `docs/plans/2026-04-graph-engine-v1.md` line 204 ("Exception to the per-file full-replace invariant") applies only to File nodes whose `source_file = 'ast-grep-walk'`. Those nodes are populated by Step 5.4 (code-graph pass), which is the sole site that exercises the exception. The JSON-sourced files handled by Step 5.3 below (kanban, roadmap, discovery, specs) always take the full-replace path — no UPDATE-in-place for any source other than `ast-grep-walk` File nodes.
 
 **Step 5.0 — Read indexer version.**
 
@@ -651,7 +720,7 @@ Iterate the file set in the order from 5.1. For each path, invoke the matching p
 
 Capture the returned `{nodes, edges}` record bundle in memory. If a source file does not exist on disk (e.g., `roadmap.json` not present on a fresh project), the parser returns `{"nodes": [], "edges": []}` per its own absence contract — skip the upsert for that file entirely. Do NOT issue a DELETE for a file that was never indexed, do NOT treat the absent file as an error, and do NOT create an empty `_source` row for it. Simply move on to the next file.
 
-If a parser raises a hard error (malformed JSON, schema violation), do NOT issue any DELETE or INSERT for that file. Record it as FAILED in the per-file tracking (see Step 5.6) and continue to the next file. Parse failures must surface before any Cypher runs — per the `## Parsers` preamble, "a parser error must surface before any DELETE runs against the graph."
+If a parser raises a hard error (malformed JSON, schema violation), do NOT issue any DELETE or INSERT for that file. Record it as FAILED in the per-file tracking (see Step 5.7) and continue to the next file. Parse failures must surface before any Cypher runs — per the `## Parsers` preamble, "a parser error must surface before any DELETE runs against the graph."
 
 **Step 5.2b — Hash-compare skip.**
 
@@ -675,12 +744,12 @@ Procedure for a single file `<file_path>`:
 
    - If exit code 0 and the returned array is empty → no `_source` row exists. Treat this as a **first index** for the file: proceed to 5.3 for a full-replace.
    - If exit code 0 and the returned array has one row → capture `stored_hash` and `stored_version` for the compare below.
-   - If the query fails (any non-zero exit — graph is corrupted, Cypher error, etc.) → treat as no `_source` row, log a one-line warning `"_source read failed for <file_path>: <error> — forcing full-replace"`, and proceed to 5.3. Do NOT abort the pass. (See Step 5.6 for how this interacts with `warnings`.)
+   - If the query fails (any non-zero exit — graph is corrupted, Cypher error, etc.) → treat as no `_source` row, log a one-line warning `"_source read failed for <file_path>: <error> — forcing full-replace"`, and proceed to 5.3. Do NOT abort the pass. (See Step 5.7 for how this interacts with `warnings`.)
 
 2. **Compute the current hash.** Apply the appropriate rule from the `## Content Hashing` section based on the file's path:
    - `.cc-master/kanban.json`, `.cc-master/roadmap.json`, `.cc-master/discovery.json` → the JSON artifacts rule.
    - `.cc-master/specs/<id>.md` → the Markdown spec files rule.
-   - (The `ast-grep-walk:<module>` pseudo-paths from the code-graph rule are wave 6, not v1.)
+   - `ast-grep-walk:<module-name>` pseudo-paths → the Code-graph module walks rule. These rows are written by Step 5.4 and the hash-compare here short-circuits the module re-walk when the composite module hash matches.
 
    Per the Content Hashing section's return-value contract, the result is either `{"hash": "<64-char-hex>"}` on success or `{"hash": null, "error": "..."}` on failure.
 
@@ -693,7 +762,7 @@ Procedure for a single file `<file_path>`:
    - If `observed_hash == stored_hash` **AND** `current_indexer_version == stored_version` → **skip this file**. Increment `unchanged_count`. Do NOT issue DELETE or any CREATE for this file. Continue to the next file in the set.
    - Else (either the content hash differs, or the stored indexer version differs, or both) → proceed to 5.3 for a full-replace.
 
-5. **Counter accounting on full-replace:** When 5.3 completes successfully for a file that reached it via this substep (i.e., the file was NOT skipped above), increment `changed_count` at the end of 5.3 on success. See Step 5.6 for the counter's definition and summary surfacing.
+5. **Counter accounting on full-replace:** When 5.3 completes successfully for a file that reached it via this substep (i.e., the file was NOT skipped above), increment `changed_count` at the end of 5.3 on success. See Step 5.7 for the counter's definition and summary surfacing.
 
 **Step 5.3 — Execute full-replace for each file.**
 
@@ -728,7 +797,7 @@ Concrete examples, one per v1 node type:
 - Module: `CREATE (n:Module {name: $name, path: $path, language: $language, file_count: $file_count, source_file: $source_file})`
 - File: `CREATE (n:File {path: $path, module: $module, language: $language, content_hash: $content_hash, size: $size, is_test: $is_test, last_indexed: $last_indexed, source_file: $source_file})`
 
-Loop simplicity over bulk performance is the v1 stance — one `kuzu_client.py query` invocation per node record. Later waves may batch via UNWIND; this subtask deliberately uses the one-shot form because it makes error-message attribution (Step 5.6) trivial: the failing statement IS the current record.
+Loop simplicity over bulk performance is the v1 stance — one `kuzu_client.py query` invocation per node record. Later waves may batch via UNWIND; this subtask deliberately uses the one-shot form because it makes error-message attribution (Step 5.7) trivial: the failing statement IS the current record.
 
 **Phase C: INSERT edges.**
 
@@ -748,7 +817,7 @@ Concrete examples, one per v1 edge type:
 - IMPLEMENTS: `MATCH (a:Task {id: $fromId}), (b:Feature {id: $toId}) CREATE (a)-[:IMPLEMENTS]->(b)`
 - TOUCHES (has an `intent` property): `MATCH (a:Spec {task_id: $fromId}), (b:Module {name: $toId}) CREATE (a)-[:TOUCHES {intent: $intent}]->(b)` — params JSON includes `"intent": "modify"` or `"intent": "create"` from the edge record's properties.
 
-CONTAINS edges are NOT emitted here — they are resolved in Step 5.4 after all per-file upserts complete.
+CONTAINS edges are NOT emitted here — they are resolved in Step 5.5 after all per-file upserts (Step 5.3) and all per-module code-graph upserts (Step 5.4) complete.
 
 **Referential integrity — dangling references drop silently.** A MATCH-then-CREATE with a non-existent endpoint returns zero rows from MATCH, so the CREATE runs on an empty set and creates zero edges. Kuzu exits 0. That is the design — "dangling references → no edge" from the Parsers preamble. Do NOT raise an error when the MATCH is empty. Do NOT log a warning for each drop (it would spam the summary on a fresh or incomplete graph). The final summary (Step 6) will surface edge counts so the user can see at a glance whether the drop rate looks wrong.
 
@@ -760,7 +829,7 @@ After Phase A, B, and C have all completed without a Cypher error for a given fi
 
 - Runs ONLY when the file was **full-replaced** in this pass — i.e., it went through Phases A + B + C of 5.3 and every Cypher statement exited 0.
 - Does NOT run when the file was skipped via the 5.2b hash-match short-circuit — the existing `_source` row is already correct; touching it would needlessly rewrite `last_indexed_at` and churn the graph without informational value. Skip paths leave `_source` alone.
-- Does NOT run when 5.3 produced a mid-file Cypher error — such a file is already added to `files_failed` by Step 5.6's error-handling contract, and the graph holds a partial upsert for that file. Writing a `_source` row on top of a partial upsert would falsely advertise the file as cleanly indexed and suppress the next pass's repair cycle. Leave `_source` unchanged so the next pass forces a full-replace.
+- Does NOT run when 5.3 produced a mid-file Cypher error — such a file is already added to `files_failed` by Step 5.7's error-handling contract, and the graph holds a partial upsert for that file. Writing a `_source` row on top of a partial upsert would falsely advertise the file as cleanly indexed and suppress the next pass's repair cycle. Leave `_source` unchanged so the next pass forces a full-replace.
 
 **Note on `--full` semantics (write-side effect):** With `--full`, this upsert effectively refreshes every `_source` row's `last_indexed_at` timestamp and `indexer_version` column, even when the content hash is unchanged. The `content_hash` written is still the current hash from disk (computed per the `h` parameter contract below), so an unchanged file under `--full` writes back an identical hash — but the timestamp and version stamps are freshly re-sampled on every `--full` pass. That freshness is the observable signal that `--full` actually ran end-to-end on each file.
 
@@ -807,21 +876,186 @@ python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
 
 The MATCH-first delete is required — a blind `CREATE (s:_source {file_path: $fp, ...})` on top of an existing row would leave two `_source` rows for the same path, which breaks the 5.2b hash compare. Never emit the CREATE without the preceding MATCH DELETE in the fallback path.
 
-**Transaction semantics.** 5.3c runs inside the same Option B envelope as 5.3 itself (see Step 5.5): each statement is its own Kuzu auto-commit transaction. The MERGE or the two-step fallback is NOT atomic with the Phase A/B/C statements — if the process is interrupted between a successful Phase C and the 5.3c MERGE, the graph holds fully-upserted nodes and edges for this file but no `_source` row yet. The next `cc-master:index` pass will see "no `_source` row → first index" in 5.2b, force another full-replace via Phase A (which cleanly DELETEs the prior pass's nodes by `source_file`), and re-run 5.3c. The divergence is self-healing within one pass — no lasting damage, just one wasted re-index.
+**Transaction semantics.** 5.3c runs inside the same Option B envelope as 5.3 itself (see Step 5.6): each statement is its own Kuzu auto-commit transaction. The MERGE or the two-step fallback is NOT atomic with the Phase A/B/C statements — if the process is interrupted between a successful Phase C and the 5.3c MERGE, the graph holds fully-upserted nodes and edges for this file but no `_source` row yet. The next `cc-master:index` pass will see "no `_source` row → first index" in 5.2b, force another full-replace via Phase A (which cleanly DELETEs the prior pass's nodes by `source_file`), and re-run 5.3c. The divergence is self-healing within one pass — no lasting damage, just one wasted re-index.
 
 **Failure handling.** If the `_source` MERGE (or either step of the fallback) exits non-zero (Cypher error):
 
 1. Log the failing `<file_path>` on its own line, prefixed `"_source upsert failed: "`.
-2. Print the failing Cypher truncated to 200 characters (trailing `…` if truncated) and the stderr JSON verbatim — same format as the 5.3 error contract in Step 5.6.
+2. Print the failing Cypher truncated to 200 characters (trailing `…` if truncated) and the stderr JSON verbatim — same format as the 5.3 error contract in Step 5.7.
 3. Mark the file as FAILED — append its `<file_path>` to `files_failed`. This overrides any earlier 5.3-level success signal for the file, because without a `_source` row the graph is in an inconsistent state: it advertises nodes for this file but the hash-tracking record is missing. The next pass will detect "no `_source` row → first index" in 5.2b and force a full-replace, so the inconsistency is bounded to the next invocation.
 4. Increment `files_failed` accordingly; do NOT increment `changed_count` (the file did not fully succeed).
 5. Continue to the next file in the set — do NOT abort the pass.
 
 A `_source` upsert failure is strictly a data-layer failure, not a structural one: the graph now has nodes but no `_source` row, next pass will force full-replace, so no lasting damage.
 
-**Step 5.4 — Resolve CONTAINS edges (finalization pass).**
+**Step 5.4 — Code-graph pass (per-module).**
 
-After every file in the set has been processed through 5.3, CONTAINS edges between Module and File nodes are resolved in a single finalization pass. This is separated out because CONTAINS depends on both Module nodes (from `discovery.json`) and File nodes (from `discovery.json`, and in wave 6 from `ast-grep-walk`) being fully present — a per-file pass cannot produce them correctly because the longest-prefix-match requires knowing the complete set of Module paths.
+This substep walks each Module's source tree with `scripts/graph/astgrep_walker.py`, extracts File / Symbol / REFERENCES records, and upserts them into the graph. It is the write-side counterpart to the Symbol (design doc line 206) and REFERENCES (design doc line 335) schema — Step 5.3 does not produce Symbol or REFERENCES rows, Step 5.4 does. It runs AFTER every JSON-sourced file has been full-replaced by Step 5.3 (so Module nodes from `discovery.json` are present in the graph) and BEFORE Step 5.5's CONTAINS finalization pass (so Symbol / REFERENCES rows exist when CONTAINS is resolved).
+
+**Invocation trigger.** This substep runs when ANY of the following is true:
+
+- `--code-graph` was set in argument parsing (Step 1). This flag is a dedicated opt-in for the code-graph layer and leaves Step 5.3's JSON-sourced files on their normal hash-compare path. The flag itself is wired by subtask #79; Step 5.4's contract here describes what the flag triggers so #79 only needs to surface it.
+- `--full` was set in argument parsing. `--full` already forces every Step 5.3 file through full-replace; it also forces every Module through the code-graph walk regardless of whether the module hash changed. The module-level hash-compare in Phase 2 below is bypassed for `--full`, same as Step 5.2b's bypass.
+- `--module <name>` was set in argument parsing and names a Module that exists in `discovery.json`. The scope narrows to that single Module only — other Modules are skipped in this pass, their `_source` rows untouched.
+
+If none of those three flags is set, skip Step 5.4 entirely. The default pass with no code-graph flag exercises only Step 5.3 (JSON-sourced full-replace) and Step 5.5 (CONTAINS finalization against whatever Files are already in the graph).
+
+**Phase 1 — Enumerate the Module set.**
+
+- If `--module <name>` is set, build a single-element list `[<name>]` after verifying the Module exists in `discovery.json` (match by `modules[].name`). If the name is unknown, abort Step 5.4 with the error `"Module <name> not found in discovery.json — cannot code-graph-walk a module the indexer does not know about."` and set a non-zero final exit code via the `files_failed` mechanism (append `"code-graph: module <name> not in discovery.json"` to the pass-level `warnings` list in Step 5.6 and record the run as a failure).
+- Otherwise, read `.cc-master/discovery.json` (which Step 5.3 has just upserted; the in-memory parse from Step 5.2 is reused, not re-read from disk) and build the list of `(module_name, module_path)` tuples from `modules[].name` + `modules[].path`. Modules with no `path` field are skipped with a pass-level warning `"code-graph: skipping module <name> — no path recorded"` appended to `warnings`.
+
+**Phase 2 — Per-module hash-compare fast path.**
+
+For each `(module_name, module_path)` in the set, before invoking the walker:
+
+1. Run the walker to obtain the File / Symbol / REFERENCES records for the module:
+
+   ```
+   python3 scripts/graph/astgrep_walker.py --module <module_name> --module-path <abs module path>
+   ```
+
+   Expect exit 0 and a single top-level JSON object on stdout with the shape `{"module": "<name>", "module_path": "<abs>", "walked_at": "<iso8601>", "files": [...], "symbols": [...], "references": [...]}`. On exit 1 (argument or parse error) or exit 2 (ast-grep binary missing), capture stderr, append `"code-graph walker failed for <module_name>: <stderr one-liner>"` to the pass-level `warnings` list, record the module in `files_failed` under the pseudo-path `ast-grep-walk:<module_name>`, and continue to the next module. Do NOT mutate the graph for that module.
+
+2. Compute the composite module hash using the "Hash rule: Code-graph module walks" algorithm already defined in this skill (Content Hashing section, step 3 bullet list). Concretely: sort the walker's `files` array by `path`, build strings of the form `"<path>:<content_hash>"`, join with `\n`, SHA-256 the UTF-8 bytes, capture the 64-char hex digest as `observed_module_hash`. Reuse the `content_hash` values already present in the walker output — do NOT re-hash disk bytes; the walker opened each file once (see walker's `_hash_file`) and the values in the output are the authoritative hashes for this pass.
+
+3. Read the stored composite hash from `_source` for the row `ast-grep-walk:<module_name>`:
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "MATCH (s:_source {file_path: $fp}) RETURN s.content_hash AS stored_hash, s.indexer_version AS stored_version" \
+     --params-json '{"fp": "ast-grep-walk:<module_name>"}'
+   ```
+
+4. Compare:
+   - If `--full` is set, skip the compare entirely and proceed to Phase 3 (full DELETE-then-INSERT). `--full` always forces a walk.
+   - If no `_source` row exists (first-ever code-graph pass for this module), proceed to Phase 3.
+   - If `observed_module_hash == stored_hash` AND `current_indexer_version == stored_version` (both from Step 5.0), **skip this module** — the walk output is stale-free. Increment `unchanged_count` by one for the module as a unit, do NOT run any DELETE or CREATE for the module's code-graph rows, and continue to the next module.
+   - Otherwise, fall through to Phase 3.
+
+**Phase 3 — DELETE-then-INSERT (per-module full-replace).**
+
+The per-module full-replace runs three Cypher statements in sequence via `scripts/graph/kuzu_client.py`, each its own Option B auto-commit transaction (same model as Step 5.3, see Step 5.6 for rationale). Every statement scopes strictly to `source_file = 'ast-grep-walk'` AND the module name — no statement in Phase 3 touches rows owned by any other source or any other module. Full-replace at the per-module boundary matches the design doc's "Upsert strategy: Full-replace per source file (not merge) — DELETE derived nodes for that file, re-insert, in one transaction" rule (see `docs/plans/2026-04-graph-engine-v1.md` upsert protocol at line 416 and the module-level phrasing in the Symbol lifecycle at line 229).
+
+1. **DELETE REFERENCES owned by this module.** REFERENCES is deleted first so the cascade of symbol ids remains resolvable for observability even though `DETACH DELETE` on the next step would also drop them.
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "MATCH (f:File {module: $name, source_file: 'ast-grep-walk'})-[r:REFERENCES]->(:Symbol) DELETE r" \
+     --params-json '{"name": "<module_name>"}'
+   ```
+
+2. **DELETE Symbol nodes owned by this module.**
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "MATCH (s:Symbol {module: $name, source_file: 'ast-grep-walk'}) DETACH DELETE s" \
+     --params-json '{"name": "<module_name>"}'
+   ```
+
+3. **DELETE File nodes owned by this module WHERE source_file = 'ast-grep-walk'.** This leaves any discovery-sourced File rows (`source_file = '.cc-master/discovery.json'`) alone — the two `source_file` values never collide because the design doc's File lifecycle rules (lines 200-203) partition File nodes by which indexer path produced them.
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "MATCH (f:File {module: $name, source_file: 'ast-grep-walk'}) DETACH DELETE f" \
+     --params-json '{"name": "<module_name>"}'
+   ```
+
+4. **INSERT File rows** from the walker's `files` array. Iterate the array; for each entry, run:
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "CREATE (f:File {path: $path, module: $module, language: $language, content_hash: $content_hash, size: $size, is_test: $is_test, last_indexed: CAST($last_indexed AS TIMESTAMP), source_file: 'ast-grep-walk'})" \
+     --params-json '<walker file record>'
+   ```
+
+   `size` may be null in the walker output for files whose size was not captured; bind it as JSON `null` and Kuzu stores NULL per the File schema (see design doc line 189). As of task #81, `File.is_test` is populated by the `classify_test_file()` function in `scripts/graph/astgrep_walker.py`, which mirrors the rules in `prompts/test-file-definition.md` (the canonical source shared with the build skill's production-quality scan) — the walker emits a real boolean per file, so `$is_test` is bound from the walker record verbatim and never defaulted to `false`.
+
+5. **INSERT Symbol rows** from the walker's `symbols` array. Iterate; for each entry:
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "CREATE (s:Symbol {id: $id, name: $name, kind: $kind, file: $file, line: $line, module: $module, source_file: 'ast-grep-walk', last_indexed: CAST($last_indexed AS TIMESTAMP)})" \
+     --params-json '<walker symbol record with last_indexed = walker output walked_at>'
+   ```
+
+   Every Symbol's `last_indexed` is the walker's top-level `walked_at` value — all symbols from one walk share one timestamp.
+
+6. **INSERT REFERENCES edges** from the walker's `references` array. Walker entries that resolved to a same-module Symbol carry a non-null `symbol_id`; entries that did not resolve carry `symbol_id: null` and are silently dropped per the no-dangling-edges rule (Parsers preamble). For each entry with a non-null `symbol_id`, MATCH both endpoint nodes by their primary keys and CREATE the rel:
+
+   ```
+   python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+     "MATCH (f:File {path: $file, source_file: 'ast-grep-walk'}), (s:Symbol {id: $symbol_id}) CREATE (f)-[:REFERENCES {line: $line, context: $context, kind: $kind, source_file: 'ast-grep-walk'}]->(s)" \
+     --params-json '{"file": "<path>", "symbol_id": "<sha-16>", "line": <int>, "context": "<trimmed source>", "kind": "<call|import|type_ref>"}'
+   ```
+
+   The walker bounds `context` to 240 chars (design doc line 348); no truncation is re-applied here.
+
+**Phase 4 — Exception to the per-file full-replace invariant (File UPDATE-in-place).**
+
+This is the one documented exception to Phase 3's DELETE-then-INSERT contract, specified in `docs/plans/2026-04-graph-engine-v1.md` line 204 ("Exception to the per-file full-replace invariant") and cross-referenced by the Symbol schema (design doc line 229) and the REFERENCES schema (design doc line 356). The skill MUST honor it exactly as the design doc phrases it.
+
+**When the exception applies.** The walker output is diff-compared against the currently-indexed state for this module. The exception is taken if and only if ALL three conditions hold:
+
+1. The set of File paths in the walker output is identical to the set of File paths currently in the graph for `module = <module_name> AND source_file = 'ast-grep-walk'` (no additions, no deletions).
+2. The set of Symbol ids in the walker output is identical to the set of Symbol ids currently in the graph for the same `module` filter (no additions, no deletions, no line-shifts — because `id` hashes in the symbol line, any shift changes the id).
+3. Every REFERENCES edge in the walker output (file, symbol_id, line, kind tuple) matches exactly one existing REFERENCES edge in the graph for the same module.
+
+If all three hold, the only change this pass can express is a `File.content_hash` update on one or more Files whose bodies churned without altering their declared symbols or reference sites. In that narrow case, **SKIP Phase 3 entirely** and instead run one UPDATE per affected File:
+
+```
+python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
+  "MATCH (f:File {path: $path, source_file: 'ast-grep-walk'}) SET f.content_hash = $content_hash, f.size = $size, f.last_indexed = CAST($last_indexed AS TIMESTAMP), f.language = $language" \
+  --params-json '<walker file record>'
+```
+
+The UPDATE targets only the four columns that can change under the exception (`content_hash`, `size`, `last_indexed`, `language`). It does NOT touch `module`, `path`, `is_test`, or `source_file` — those are invariant for a File under the exception. Symbol and REFERENCES rows are left untouched.
+
+**Escalation rule.** If at any point during the diff compare the three conditions above fail to hold (a new File path appears, a Symbol id disappears, a REFERENCES tuple diverges), abandon the exception and fall through to Phase 3's full DELETE-then-INSERT for the whole module. No partial UPDATE-plus-DELETE hybrid is permitted — the design doc's "If the targeted pass detects any symbol change, the indexer escalates to the full module DELETE + re-INSERT" (Symbol section, line 229) is literal. The diff compare itself runs in-memory against a single graph query that pulls the current `{files, symbols, references}` shape for the module; the comparison cost is bounded by the module's size.
+
+**Phase 5 — Upsert `_source` row for `ast-grep-walk:<module_name>`.**
+
+After Phase 3 (or Phase 4) completes without a Cypher error, upsert the `_source` bookkeeping row for the module pseudo-path. The parameters and Cypher form match Step 5.3c's MERGE template exactly, substituting the module pseudo-path:
+
+- `fp` = `"ast-grep-walk:<module_name>"` (the literal pseudo-path string stamped into Step 4.2's absence-handling branch).
+- `h` = `observed_module_hash` from Phase 2 step 2.
+- `ts` = a fresh ISO-8601 UTC timestamp sampled once per 5.4 module pass.
+- `nc` = `len(walker_output.files) + len(walker_output.symbols)` — the walker emits two node types for this module (plus REFERENCES edges), so `node_count` is the sum of both per the `_source.node_count` column definition (design doc line 369).
+- `ec` = count of REFERENCES CREATE statements that exited 0 in Phase 3 step 6 (unresolved references with `symbol_id = null` are dropped and do not count).
+- `v` = `current_indexer_version` from Step 5.0.
+
+Run the same MERGE form as Step 5.3c's primary-form Cypher. Failure handling mirrors 5.3c's: on Cypher error, log, append the pseudo-path to `files_failed`, continue to the next module. The next pass will detect "no `_source` row → first index" in Phase 2 and force full-replace.
+
+**Counter accounting.**
+
+- `changed_count` — increment by one for every Module that reached Phase 3 or Phase 4 successfully (module counts as one unit for code-graph purposes, same as a JSON file counts as one unit for Step 5.3).
+- `unchanged_count` — increment by one for every Module whose Phase 2 hash-compare fast-path fired (module composite hash matched stored, indexer version matched).
+- `nodes_written` — add Files CREATEd in Phase 3 step 4 AND Symbols CREATEd in Phase 3 step 5 (not Phase 4 UPDATEs, which are in-place mutations, not new node writes).
+- `edges_written` — add REFERENCES CREATEs from Phase 3 step 6. Phase 4's exception path writes zero edges (by design — only File columns change).
+- `files_failed` — append `"ast-grep-walk:<module_name>"` for any module that errored out of Phase 2 (walker failure) or Phase 3 (Cypher error).
+
+Every counter update is pass-level (the same counters Step 5.3 feeds), so Step 6's summary line naturally aggregates JSON-sourced and code-graph activity together.
+
+**Known limitations — dynamic dispatch not resolved (v0.22 SCIP trigger).**
+
+ast-grep is a structural (tree-sitter) matcher, not a type-aware resolver. The v1 code-graph layer therefore does NOT capture the following call edges as REFERENCES, by design:
+
+- **Interface / virtual dispatch** — a call site that invokes a method on an interface or abstract base class resolves to the lexical method name only. Concrete implementers that satisfy the interface are not linked back to the call site.
+- **Reflection / introspection** — calls made via `getattr`, `Method.invoke`, `reflect.Value.Call`, dynamic `import`, or string-addressed dispatch tables are invisible to the walker.
+- **DI containers** — method calls through a dependency-injection container (Spring `@Autowired`, Guice, constructors invoked by a factory registry) have no static call edge from the consumer to the implementation.
+- **Runtime polymorphism** — function-pointer-in-a-map jumps, trait objects / vtables (Rust `dyn Trait`, C++ `virtual`), closures stored and invoked later, and duck-typed call sites resolved at runtime are all out of scope for v1.
+
+Accepted v1 tradeoff to ship the indexer on a single binary with zero per-language setup. Trigger criteria for the v0.22 SCIP swap-in (documented in `docs/plans/2026-04-graph-engine-v1.md` "NOT in v1" → "Deferred to v0.22" → first bullet "Symbol nodes with dynamic-dispatch resolution / cross-module call closure"):
+
+1. A user reports missing call-edges that materially affect `/cc-master:impact` correctness — specifically, a changed symbol whose real callers are not surfaced by the impact query.
+2. ast-grep's output format breaks in a way that makes parsing fragile beyond the walker's current `scripts/graph/astgrep_walker.py` coverage.
+3. SCIP install UX improves to the point where "one command per language" becomes acceptable operator setup.
+
+Any one of those conditions opens the v0.22 SCIP indexer swap-in task. The graph schema (Module, File, Symbol, REFERENCES) is stable across the swap; only the indexer binary changes. Until that trigger fires, `/cc-master:impact` and other graph readers account for this limitation by falling back to conservative approximations (e.g., module-level impact, string-grep on dynamic-dispatch suspects) rather than claiming completeness.
+
+**Step 5.5 — Resolve CONTAINS edges (finalization pass).**
+
+After every file in the set has been processed through 5.3 and every Module has been processed through 5.4, CONTAINS edges between Module and File nodes are resolved in a single finalization pass. This is separated out because CONTAINS depends on both Module nodes (from `discovery.json`) and File nodes (from `discovery.json` AND from Step 5.4's `ast-grep-walk` output) being fully present — a per-file pass cannot produce them correctly because the longest-prefix-match requires knowing the complete set of Module paths.
 
 Procedure:
 
@@ -856,9 +1090,9 @@ Procedure:
 
 4. If no Module nodes exist (e.g., `discovery.json` was absent), the finalization pass is a no-op and produces zero CONTAINS edges. Do not treat this as an error.
 
-The CONTAINS finalization pass is NOT counted against a specific source file in the per-file success tracking — it is a graph-wide finalization. Count its successful CREATEs toward the pass-level `edges_written` counter (Step 5.6) but do NOT mark any source file as FAILED if CONTAINS resolution errors. A CONTAINS error is surfaced as a separate pass-level warning in the Step 6 summary.
+The CONTAINS finalization pass is NOT counted against a specific source file in the per-file success tracking — it is a graph-wide finalization. Count its successful CREATEs toward the pass-level `edges_written` counter (Step 5.7) but do NOT mark any source file as FAILED if CONTAINS resolution errors. A CONTAINS error is surfaced as a separate pass-level warning in the Step 6 summary.
 
-**Step 5.5 — Transaction semantics (Option B).**
+**Step 5.6 — Transaction semantics (Option B).**
 
 `scripts/graph/kuzu_client.py` opens a fresh `kuzu.Database` and `kuzu.Connection` on every `query` invocation and closes them when the Python process exits. Its `cmd_query` function passes a single Cypher string to `conn.execute(...)` and does not wrap the call in any `BEGIN TRANSACTION` / `COMMIT` block. This means **Option A (multi-statement transaction in one CLI call) is NOT available through the current wrapper** — the wrapper's contract is one statement per invocation. A true cross-statement transaction would require either (a) extending the wrapper to accept a multi-statement script and manage BEGIN/COMMIT itself, or (b) holding a persistent connection across many invocations, neither of which is in scope for this subtask.
 
@@ -874,15 +1108,15 @@ This skill therefore uses **Option B**: each individual CREATE or DELETE stateme
 
 Document the Option B choice in the Step 6 summary output — specifically, include a one-line note `"transaction_mode": "per-statement (Option B)"` in the summary JSON so downstream skills can see what atomicity guarantee they are reading under.
 
-**Step 5.6 — Error handling and per-pass counters.**
+**Step 5.7 — Error handling and per-pass counters.**
 
-Every `kuzu_client.py query` invocation in phases 5.3 A/B/C, the 5.3c `_source` upsert, and the 5.4 finalization pass must be wrapped in exit-code handling. Apply the contract table from Step 3 uniformly. Specifically for Cypher errors (exit code 4):
+Every `kuzu_client.py query` invocation in phases 5.3 A/B/C, the 5.3c `_source` upsert, Step 5.4's per-module Phase 1–5 statements, and the Step 5.5 CONTAINS finalization pass must be wrapped in exit-code handling. Apply the contract table from Step 3 uniformly. Specifically for Cypher errors (exit code 4):
 
-1. Print the failing file path (for 5.3 or 5.3c) or the literal string `"CONTAINS finalization"` (for 5.4) as the first line. For 5.3c, prefix with `"_source upsert failed: "` so the origin is unambiguous in the log.
+1. Print the failing file path (for 5.3 or 5.3c), the pseudo-path `ast-grep-walk:<module_name>` (for 5.4 Phase 3/4/5 errors), or the literal string `"CONTAINS finalization"` (for 5.5) as the first line. For 5.3c, prefix with `"_source upsert failed: "` so the origin is unambiguous in the log.
 2. Print the failing Cypher statement, truncated to 200 characters with a trailing `…` if truncated.
 3. Print the stderr JSON verbatim — `kuzu_client.py` emits `{"error": "<msg>"}` on exit 4.
-4. Mark the current file's upsert as FAILED (do this by adding the file path to a `files_failed` list maintained across the pass). A 5.3c failure adds the file to `files_failed` even if 5.3 itself reported success — the combined "nodes present but no `_source` row" state is treated as a failed index for the file because the next pass will need to re-do it. For a 5.4 error, do NOT mark any source file as FAILED; instead append `"CONTAINS finalization"` to the `warnings` list.
-5. Proceed to the next file (or to Step 6 if the error was in 5.4). Do NOT abort the whole pass on any single file failure.
+4. Mark the current file or module's upsert as FAILED (do this by adding its path / pseudo-path to a `files_failed` list maintained across the pass). A 5.3c failure adds the file to `files_failed` even if 5.3 itself reported success — the combined "nodes present but no `_source` row" state is treated as a failed index for the file because the next pass will need to re-do it. A 5.4 Phase 3/4/5 Cypher error adds `"ast-grep-walk:<module_name>"` to `files_failed`. For a 5.5 error, do NOT mark any source file as FAILED; instead append `"CONTAINS finalization"` to the `warnings` list.
+5. Proceed to the next file or module (or to Step 6 if the error was in 5.5). Do NOT abort the whole pass on any single file failure.
 6. If `files_failed` is non-empty at the end of the pass, the skill's final exit code is non-zero (e.g., `2`) — but Step 6 still runs and renders the summary including the failed files list.
 
 A 5.3c hash computation failure (the parenthetical "hash unavailable" path in 5.3c's parameter table for `h`) is NOT a Cypher error and does NOT trigger the above sequence — it appends a `warnings` entry (`"_source hash unavailable for <file_path>: <error> — _source not updated"`) and leaves the file out of `files_failed`, since the full-replace itself succeeded and the only casualty is the bookkeeping row.
@@ -900,9 +1134,11 @@ Maintain these counters across the entire pass (initialize to zero or empty at t
 - `unchanged_count` — number of files that were SKIPPED by the 5.2b hash-compare (both content hash and indexer version matched the `_source` row). Incremented only by 5.2b. Never incremented when `--full` is set, because `--full` bypasses the skip.
 - `changed_count` — number of files that proceeded through 5.3 full-replace successfully (i.e., DELETE and all INSERTs completed without a Cypher error). Incremented at the end of 5.3 on success. A file that fails in 5.3 is counted in `files_failed`, NOT in `changed_count`. When `--full` is set, every file that reaches 5.3 successfully counts toward `changed_count` regardless of hash state.
 - `deleted_count` — number of files that were present in `_source` at the start of the pass but are no longer on disk, and whose rows were therefore deleted. Populated by Step 4 (absence handling) — incremented once per successful per-file absence sweep (DETACH DELETE of owned nodes plus `_source` row delete). Initialize to `0` at the start of Step 4.
-- `nodes_written` — sum of successful node CREATEs across all files. Increment after each `kuzu_client.py query` exits 0 for a node CREATE in 5.3 B.
-- `edges_written` — sum of successful edge CREATEs across all files (including the CONTAINS edges from 5.4). Increment after each `kuzu_client.py query` exits 0 for an edge CREATE in 5.3 C or a CONTAINS CREATE in 5.4.
-- `warnings` — list of pass-level warnings (e.g., `"CONTAINS finalization"` on a 5.4 error, `"specs parser: skipping non-standard filename foo.md"` bubbled up from the parser, `"_source read failed for <file_path> — forced full-replace (graph may need rebuild)"` from 5.2b).
+- `nodes_written` — sum of successful node CREATEs across all files. Increment after each `kuzu_client.py query` exits 0 for a node CREATE in 5.3 B OR for a File / Symbol CREATE in 5.4 Phase 3 (steps 4 and 5).
+- `edges_written` — sum of successful edge CREATEs across all files (including the CONTAINS edges from 5.5 and the REFERENCES edges from 5.4 Phase 3 step 6). Increment after each `kuzu_client.py query` exits 0 for an edge CREATE in 5.3 C, 5.4 Phase 3 step 6, or a CONTAINS CREATE in 5.5.
+- `symbols_written` — sum of successful Symbol CREATEs from 5.4 Phase 3 step 5 across all modules walked in this pass. Distinct from `nodes_written` so Step 6 can surface the code-graph node count independently of the JSON-sourced node count. Increment after each Symbol CREATE exits 0.
+- `references_written` — sum of successful REFERENCES edge CREATEs from 5.4 Phase 3 step 6 across all modules walked in this pass. Distinct from `edges_written` so Step 6 can surface the code-graph edge count independently. Increment after each REFERENCES CREATE exits 0.
+- `warnings` — list of pass-level warnings (e.g., `"CONTAINS finalization"` on a 5.5 error, `"specs parser: skipping non-standard filename foo.md"` bubbled up from the parser, `"_source read failed for <file_path> — forced full-replace (graph may need rebuild)"` from 5.2b, `"code-graph walker failed for <module_name>: <stderr>"` from 5.4 Phase 2, `"code-graph: skipping module <name> — no path recorded"` from 5.4 Phase 1).
 
 Invariant: for any given pass, `files_processed == unchanged_count + changed_count + len(files_failed)` (excluding files absent from disk that were never processed). Use this identity as a self-check at the end of Step 5 — if the arithmetic does not balance, log a pass-level warning rather than aborting, since miscount is a reporting bug, not a correctness bug.
 
@@ -925,7 +1161,11 @@ python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Spec)
 python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:Feature) RETURN count(f) AS features"
 python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module) RETURN count(m) AS modules"
 python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (fi:File) RETURN count(fi) AS files"
+python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (sy:Symbol) RETURN count(sy) AS symbols"
+python3 scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH ()-[r:REFERENCES]->() RETURN count(r) AS references_count"
 ```
+
+The last two queries surface the Step 5.4 code-graph pass's output. On projects that never invoke the code-graph pass (no `--code-graph`, no `--full`, no `--module <name>`), both counts are `0` and the corresponding segments of the summary line below render as `0 symbols, 0 references` — zero is not a failure signal, it just reflects that the code-graph layer has not been populated on this project.
 
 If any count query exits non-zero, follow the Step 3 contract table (print stderr JSON prefixed with `"Kuzu count query failed: "`, then continue — a failed count is reported as `?` in the summary line rather than aborting, since the upsert itself already succeeded).
 
@@ -938,16 +1178,18 @@ Read the wall-clock start timestamp captured at the beginning of Step 1. Compute
 Emit a single line in this exact format:
 
 ```
-Indexed: <C> changed, <U> unchanged, <D> deleted — <T> tasks, <S> specs, <F> features, <M> modules, <Fi> files — <secs>s
+Indexed: <C> changed, <U> unchanged, <D> deleted — <T> tasks, <S> specs, <F> features, <M> modules, <Fi> files, <Sy> symbols, <R> references — <secs>s
 ```
 
 Where:
-- `<C>` is `changed_count` from Step 5.6 — files that went through full-replace this pass (their content hash differed from the stored `_source` hash, so they were re-parsed and re-upserted).
-- `<U>` is `unchanged_count` from Step 5.6 — files that hit the 5.2b hash-compare skip (content hash and indexer version both matched the stored `_source` row, so no re-parse/re-upsert occurred).
-- `<D>` is `deleted_count` from Step 5.6 — files that were in `_source` at the start of the pass but are no longer on disk; their graph rows and `_source` row were removed during absence handling.
+- `<C>` is `changed_count` from Step 5.7 — files that went through full-replace this pass (their content hash differed from the stored `_source` hash, so they were re-parsed and re-upserted).
+- `<U>` is `unchanged_count` from Step 5.7 — files that hit the 5.2b hash-compare skip (content hash and indexer version both matched the stored `_source` row, so no re-parse/re-upsert occurred).
+- `<D>` is `deleted_count` from Step 5.7 — files that were in `_source` at the start of the pass but are no longer on disk; their graph rows and `_source` row were removed during absence handling.
 - `<T>` is the Task count from 6.1 (not subtasks — Subtasks are a separate node type and are not called out in the headline; they are implied by tasks).
 - `<S>`, `<F>`, `<M>`, `<Fi>` are Spec, Feature, Module, File counts respectively.
-- `<T>`, `<S>`, `<F>`, `<M>`, `<Fi>` are graph totals AFTER the pass completes — they represent the end-state of the graph, not deltas.
+- `<Sy>` is the Symbol count from 6.1 — the total number of Symbol nodes produced by Step 5.4's code-graph pass and still present after the pass completes.
+- `<R>` is the REFERENCES count from 6.1 — the total number of REFERENCES edges between File and Symbol nodes, produced by Step 5.4 Phase 3 step 6.
+- `<T>`, `<S>`, `<F>`, `<M>`, `<Fi>`, `<Sy>`, `<R>` are graph totals AFTER the pass completes — they represent the end-state of the graph, not deltas.
 - `<secs>` is the `{:.1f}`-formatted duration from 6.2.
 - Both em-dashes `—` (U+2014), not two hyphens, separate (a) the per-file activity triple from the graph-totals list, and (b) the graph-totals list from the duration.
 
@@ -962,10 +1204,10 @@ If the `full` flag was recorded in Step 1, prepend the literal string `"(--full:
 Four example summary lines illustrating the format variants (happy path, one-file change, deletion with hash_errors trailer shown at zero, and `--full` forced re-index):
 
 ```
-Indexed: 0 changed, 12 unchanged, 0 deleted — 35 tasks, 6 specs, 0 features, 4 modules, 147 files — 0.8s
-Indexed: 1 changed, 11 unchanged, 0 deleted — 36 tasks, 6 specs, 0 features, 4 modules, 147 files — 1.2s
-Indexed: 0 changed, 11 unchanged, 1 deleted — 36 tasks, 5 specs, 0 features, 4 modules, 147 files — 0.9s (hash_errors: 0)
-(--full: forced re-index) Indexed: 12 changed, 0 unchanged, 0 deleted — 36 tasks, 5 specs, 0 features, 4 modules, 147 files — 3.1s
+Indexed: 0 changed, 12 unchanged, 0 deleted — 35 tasks, 6 specs, 0 features, 4 modules, 147 files, 0 symbols, 0 references — 0.8s
+Indexed: 1 changed, 11 unchanged, 0 deleted — 36 tasks, 6 specs, 0 features, 4 modules, 147 files, 0 symbols, 0 references — 1.2s
+Indexed: 0 changed, 11 unchanged, 1 deleted — 36 tasks, 5 specs, 0 features, 4 modules, 147 files, 892 symbols, 2134 references — 0.9s (hash_errors: 0)
+(--full: forced re-index) Indexed: 12 changed, 0 unchanged, 0 deleted — 36 tasks, 5 specs, 0 features, 4 modules, 147 files, 892 symbols, 2134 references — 3.1s
 ```
 
 The third example shows the `(hash_errors: 0)` trailer only for illustrative purposes — in practice, per the `hash_errors == 0` omission rule above, that parenthetical would NOT be emitted when the counter is zero. A real pass emits the trailer only when `hash_errors > 0`.
@@ -982,13 +1224,13 @@ Substitute `<N>` with the observed `unchanged_count`. The warning does NOT chang
 
 **Step 6.5 — Emit failed-file list if any.**
 
-If the `files_failed` list from Step 5.6 is non-empty, emit a second line immediately after the summary line:
+If the `files_failed` list from Step 5.7 is non-empty, emit a second line immediately after the summary line:
 
 ```
 FAILED: <N> files — <comma-separated list of file paths>
 ```
 
-`<N>` is `len(files_failed)`. The file paths are the literal strings from the list, joined with `", "`. When this line is emitted, the skill's final exit code MUST be non-zero (use `2`, matching the Step 5.6 convention).
+`<N>` is `len(files_failed)`. The file paths are the literal strings from the list, joined with `", "`. When this line is emitted, the skill's final exit code MUST be non-zero (use `2`, matching the Step 5.7 convention).
 
 **Step 6.6 — Close the Kuzu database.**
 
@@ -1083,7 +1325,7 @@ This branch mirrors Step 5.2b's hash-compare logic and Step 5.3 / 5.3c's full-re
 
 6. **Upsert `_source`.** On successful completion of Phases A, B, and C, run Step 5.3c's MERGE statement for `touch_target`, binding the parameters exactly as 5.3c defines — `fp` = `touch_target`, `h` = the `observed_hash` already computed in substep 3 (do NOT re-hash), `ts` = a fresh ISO-8601 UTC timestamp, `nc` = `len(bundle["nodes"])`, `ec` = `len(bundle["edges"])`, `v` = `current_indexer_version`. On non-zero exit of the MERGE, set `outcome = "failed"`, record the stderr text for the summary line, increment `files_failed = 1`, and skip to Substep T.4. On success, set `outcome = "changed"` and increment `changed_count = 1`.
 
-Note: the counters (`changed_count`, `unchanged_count`, `deleted_count`, `files_failed`) are local to the touch path in the sense that they are always either 0 or 1 after this section runs — there is exactly one file in play. The names are kept consistent with Step 5.6's vocabulary so implementers do not have to learn a second set of names for the same concept.
+Note: the counters (`changed_count`, `unchanged_count`, `deleted_count`, `files_failed`) are local to the touch path in the sense that they are always either 0 or 1 after this section runs — there is exactly one file in play. The names are kept consistent with Step 5.7's vocabulary so implementers do not have to learn a second set of names for the same concept.
 
 **Substep T.4 — Emit the touch summary line.**
 

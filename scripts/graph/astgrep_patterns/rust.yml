@@ -1,0 +1,37 @@
+# Rust patterns for the cc-master code-graph walker.
+
+function:
+  - pattern: "fn $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "fn $NAME($$$ARGS) -> $RET { $$$BODY }"
+  - pattern: "pub fn $NAME($$$ARGS) { $$$BODY }"
+  - pattern: "pub fn $NAME($$$ARGS) -> $RET { $$$BODY }"
+
+struct:
+  - pattern: "struct $NAME { $$$FIELDS }"
+  - pattern: "pub struct $NAME { $$$FIELDS }"
+  - pattern: "struct $NAME($$$FIELDS);"
+  - pattern: "pub struct $NAME($$$FIELDS);"
+
+enum:
+  - pattern: "enum $NAME { $$$VARIANTS }"
+  - pattern: "pub enum $NAME { $$$VARIANTS }"
+
+interface:
+  # Rust traits map to the "interface" kind in the shared schema.
+  - pattern: "trait $NAME { $$$BODY }"
+  - pattern: "pub trait $NAME { $$$BODY }"
+
+type:
+  - pattern: "type $NAME = $$$RHS;"
+  - pattern: "pub type $NAME = $$$RHS;"
+
+method:
+  # Impl-block methods. Dispatch resolution is out of scope (subtask 77).
+  - pattern: "impl $$$TYPE { fn $NAME($$$ARGS) { $$$BODY } }"
+  - pattern: "impl $$$TYPE { pub fn $NAME($$$ARGS) { $$$BODY } }"
+
+import:
+  - pattern: "use $$$NAME;"
+
+call:
+  - pattern: "$NAME($$$ARGS)"
