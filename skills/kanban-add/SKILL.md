@@ -264,65 +264,39 @@ For each missing label, create it:
 
 ## Post-Write Invalidation
 
-Every `.cc-master/kanban.json` write performed by this skill — initial task insertion (Mode 1 roadmap batch, Mode 2 insights batch, Mode 3 manual create), `blocked_by` rewrites, the `metadata.gh_issue_number` / `metadata.gh_issue_url` link-back from `## GitHub Issue Creation`, or any other mutation — MUST be followed by a single graph-invalidation call at the end of the invocation. This is the write-half counterpart to `## Graph-Backed Dedup` (the read half). Together they define the full graph-integration contract for kanban-add: read through the graph with a JSON fallback, and stamp the graph after every write so the next graph-backed skill sees a fresh hash.
-
-### Invocation
-
-After all kanban.json writes for this invocation have completed successfully, invoke the Skill tool with:
-
-- `skill`: `"cc-master:index"`
-- `args`: `"--touch .cc-master/kanban.json"`
-
-The path argument is a literal constant — always `.cc-master/kanban.json`, never a variable and never user-supplied. This makes argument-validation failures (exit code `2`) impossible under normal operation; if exit code `2` is observed here, it signals a skill-author code mistake and must be surfaced loudly.
-
-### Exit-Code Contract
-
-Inspect the exit code returned by the `cc-master:index` Skill invocation. The touch path uses the exit-code contract documented in `skills/index/SKILL.md` under `## --touch Single-File Refresh` → Substep T.6:
-
-| Code | Meaning |
-|------|---------|
-| `0`  | Success — the stamped `_source` row was `changed`, `unchanged`, or `deleted`. All three are valid outcomes; continue silently. |
-| `2`  | Argument validation failure — the path or flag combination was rejected by `cc-master:index`'s argument parser. This MUST NOT happen here because the path is a literal constant `.cc-master/kanban.json`. If it does, the skill author has made a code mistake — surface the failure loudly with the warning wording below and treat it as a bug to fix rather than a transient error. |
-| `3`  | Kuzu database-path issue — `.cc-master/graph.kuzu` is missing, unreadable, or could not be opened; or the `close` call inside the touch path failed. |
-| `4`  | Cypher error during the touch execution — a `DELETE`, `MERGE`, or `_source` upsert statement emitted by `cc-master:index` returned a non-zero exit from `scripts/graph/kuzu_client.py query`. |
-
-Any other non-zero exit code (e.g., `1` — unexpected error) is treated the same way as `3` and `4` for the purposes of this skill: emit the warning and continue.
-
-### Warning Wording on Non-Zero Exit
-
-On ANY non-zero exit code (`2`, `3`, `4`, or anything else), emit exactly one warning line to stderr, substituting the observed exit code for `<N>`:
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
 
 ```
-Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
 ```
 
-Do not emit additional diagnostic lines, do not retry the touch, and do not prompt the user — the single warning line is the entire recovery protocol for this skill. Operators who see the warning can run `/cc-master:index --full` out-of-band to re-stamp every source file and bring the graph back into agreement with the JSON artifacts.
-
-### Non-Blocking Contract
-
-A failed invalidation MUST NOT reverse, roll back, delete, or block any `kanban.json` write that has already succeeded. The order of operations is strict: write kanban.json first, emit the one-shot `--touch` second. If the touch exits non-zero, the kanban.json write stands — the task is created, its `blocked_by` edge is recorded, its `gh_issue_number` is linked, and the skill exits with a zero status on the kanban side.
-
-This is the direct consequence of the `prompts/graph-read-protocol.md` invariant that **JSON is authoritative and the graph is a derived index**. When the graph is stale or unreachable, the next graph-backed skill (kanban render, kanban-add dedup on a later invocation, spec context-load, impact analysis, and so on) performs the hash-check of `## Graph-Backed Dedup`'s Check 2, sees the mismatch, and falls back to reading `kanban.json` directly. Correctness is preserved unconditionally — the only cost is the skipped graph-query optimization until someone runs `/cc-master:index --full`.
-
-### Batch Coalescing — One `--touch` Per Invocation
-
-When a single `kanban-add` invocation produces multiple `kanban.json` writes — a Mode 1 roadmap batch of N features, a Mode 2 insights batch of N suggestions, or any mode paired with `--add-gh-issues` where each task gets both an initial create write AND a later `metadata.gh_issue_number` / `metadata.gh_issue_url` link-back write — the skill MUST invoke `/cc-master:index --touch .cc-master/kanban.json` **exactly ONCE at the end of the invocation**, never once per task and never once per write.
-
-Rationale: `--touch` is a hash-keyed single-file refresh — it compares the on-disk content hash to the stored `_source.content_hash` and only re-indexes when they differ. N per-task calls against a file that is still being mutated would produce N-1 `unchanged` outcomes (the file hash moves between mutations but the stored hash only updates on the call that wins the race) plus one final `changed` outcome that actually does the useful work, wasting the subprocess-spawn latency of the other N-1. A single coalesced call after the last write ensures exactly one `changed` outcome per session and one cheap round-trip to Kuzu.
-
-The coalescing rule applies regardless of mode and regardless of whether `--add-gh-issues` is present.
-
-### Usage Sketch — Where the Coalesced Touch Fires
-
-The concrete wiring of these steps inside the mode bodies is a sibling subtask's responsibility and is not performed here. This section only defines WHEN the single `--touch` call fires relative to each mode's writes:
-
-- **Mode 1 (`## Mode 1: From Roadmap`)** — after ALL selected roadmap features have been written to `kanban.json` AND any `--add-gh-issues` link-back writes (the `metadata.gh_issue_number` / `metadata.gh_issue_url` updates described in `## GitHub Issue Creation` step 6) have completed for the batch. One `--touch` call, fired after the last write of the invocation.
-
-- **Mode 2 (`## Mode 2: From Insights`)** — after ALL selected insights suggestions have been written to `kanban.json` AND any `--add-gh-issues` link-back writes for the batch have completed. One `--touch` call, fired after the last write of the invocation.
-
-- **Mode 3 (`## Mode 3: Manual`)** — after the single manual task's create write AND (if `--add-gh-issues` was specified) the single link-back write for that task have both completed. One `--touch` call, fired after the last write of the invocation.
-
-In all three modes, if the user selects `"Stop"` at the overlap prompt defined in `## Graph-Backed Dedup` → `### Three-Way Overlap Prompt`, the coalesced `--touch` still fires once at stop-time, covering whatever writes landed before the stop. If zero writes happened (e.g., every item was skipped, or `"Stop"` was chosen before the first write), the skill MAY skip the `--touch` call entirely — there is nothing to invalidate.
+**Per-mode firing points (kanban-add).** Mode 1 (`## Mode 1: From Roadmap`): one `--touch` after ALL roadmap features have been written AND any `--add-gh-issues` link-back writes have completed. Mode 2 (`## Mode 2: From Insights`): one `--touch` after ALL selected insights suggestions have been written AND any `--add-gh-issues` link-back writes have completed; the `pending-suggestions.json` write happens in the same batch sequence but targets a different file and does NOT trigger kanban invalidation. Mode 3 (`## Mode 3: Manual`): one `--touch` per invocation after the single manual task's create AND any `--add-gh-issues` link-back metadata write have both completed. In all three modes, if the user selects `"Stop"` at the overlap prompt, the coalesced `--touch` still fires once at stop-time covering whatever writes landed before the stop. If zero writes happened, the touch MAY be skipped entirely.
 
 ## Mode 1: From Roadmap
 
@@ -459,7 +433,7 @@ In all three modes, if the user selects `"Stop"` at the overlap prompt defined i
    Run /cc-master:kanban to see the board.
    ```
 
-11. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE, at the end of the Mode 1 pass, after all kanban.json mutations (initial task creates from Step 6, `blocked_by` updates from Step 7, and any `--add-gh-issues` link-back writes from Step 9) have completed. This is the single coalesced `/cc-master:index --touch .cc-master/kanban.json` call for the entire invocation — do NOT fire `--touch` per feature or per write inside the loops above. If zero writes happened (every feature was skipped in Step 5, or `"Stop"` was selected before any create), the touch MAY be skipped per the `## Post-Write Invalidation` → `### Usage Sketch` rule.
+11. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE, at the end of the Mode 1 pass, after all kanban.json mutations (initial task creates from Step 6, `blocked_by` updates from Step 7, and any `--add-gh-issues` link-back writes from Step 9) have completed. This is the single coalesced `/cc-master:index --touch .cc-master/kanban.json` call for the entire invocation — do NOT fire `--touch` per feature or per write inside the loops above. If zero writes happened (every feature was skipped in Step 5, or `"Stop"` was selected before any create), the touch MAY be skipped per the canonical contract's batch-coalescing rule (`prompts/kanban-write-protocol.md` → `## Batch Coalescing — One --touch Per Invocation`).
 
 ## Mode 2: From Insights
 
@@ -494,7 +468,7 @@ In all three modes, if the user selects `"Stop"` at the overlap prompt defined i
 
 8. Print summary. If `--add-gh-issues` was present, include `→ GH #<number>` per task and a `GitHub Issues: N created` footer.
 
-9. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE, at the end of the Mode 2 pass, after all kanban.json mutations (initial task creates from Step 5, and any `--add-gh-issues` link-back writes from Step 7) have completed. The Step 6 `pending-suggestions.json` write happens in the same batch sequence but targets a different file, so it does NOT require kanban.json invalidation. This is the single coalesced `/cc-master:index --touch .cc-master/kanban.json` call for the entire invocation — do NOT fire `--touch` per suggestion or per write inside the loops above. If zero writes happened (every suggestion was skipped in Step 4, or `"Stop"` was selected before any create), the touch MAY be skipped per the `## Post-Write Invalidation` → `### Usage Sketch` rule.
+9. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE, at the end of the Mode 2 pass, after all kanban.json mutations (initial task creates from Step 5, and any `--add-gh-issues` link-back writes from Step 7) have completed. The Step 6 `pending-suggestions.json` write happens in the same batch sequence but targets a different file, so it does NOT require kanban.json invalidation. This is the single coalesced `/cc-master:index --touch .cc-master/kanban.json` call for the entire invocation — do NOT fire `--touch` per suggestion or per write inside the loops above. If zero writes happened (every suggestion was skipped in Step 4, or `"Stop"` was selected before any create), the touch MAY be skipped per the canonical contract's batch-coalescing rule (`prompts/kanban-write-protocol.md` → `## Batch Coalescing — One --touch Per Invocation`).
 
 ## Mode 3: Manual
 
@@ -551,7 +525,7 @@ In all three modes, if the user selects `"Stop"` at the overlap prompt defined i
    Run /cc-master:kanban to see the board.
    ```
 
-7. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE per Mode 3 invocation. Even though Mode 3 writes a single task, both the initial create from Step 4 AND any `--add-gh-issues` link-back metadata write from Step 5 count as kanban.json mutations; coalesce into a single `/cc-master:index --touch .cc-master/kanban.json` call at the end. If zero writes happened (the user selected `"Skip this one"` or `"Stop"` at Step 3), the touch MAY be skipped per the `## Post-Write Invalidation` → `### Usage Sketch` rule.
+7. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE per Mode 3 invocation. Even though Mode 3 writes a single task, both the initial create from Step 4 AND any `--add-gh-issues` link-back metadata write from Step 5 count as kanban.json mutations; coalesce into a single `/cc-master:index --touch .cc-master/kanban.json` call at the end. If zero writes happened (the user selected `"Skip this one"` or `"Stop"` at Step 3), the touch MAY be skipped per the canonical contract's batch-coalescing rule (`prompts/kanban-write-protocol.md` → `## Batch Coalescing — One --touch Per Invocation`).
 
 ## What NOT To Do
 

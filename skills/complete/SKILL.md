@@ -152,6 +152,8 @@ Build and QA agents frequently leave uncommitted changes in the worktree. If the
    }
    ```
 
+   This is one of multiple kanban writes in this invocation; the single coalesced `--touch` fires once at the end of the invocation per the `## Post-Write Invalidation` section, not after this individual step.
+
 7. **Remember results for PR description.** The test results summary will be included in the PR body under a `## Test Results` section in Step 4.
 
 ### Step 3: Determine Completion Method (Merge vs PR)
@@ -303,6 +305,8 @@ Remove after PR merges: git worktree remove <worktree-path>
 
 **Multi-task:** Do this for each task as it is processed (not just at the end). Each task gets marked complete individually even though the merge happens once at the end.
 
+After this write completes, perform Post-Write Invalidation per the `## Post-Write Invalidation` section.
+
 ### Step 7: Update Roadmap (if applicable)
 
 1. Read the task's `metadata.feature_id` from kanban.json
@@ -358,6 +362,40 @@ Roadmap updates:
   feat-5 "Add structured logging" -> done
 
 Run /cc-master:kanban to see the updated board.
+```
+
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
 ```
 
 ## What NOT To Do
