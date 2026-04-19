@@ -15,20 +15,36 @@ Exit codes:
     3  database path not found (query/close on non-existent db)
     4  Cypher parse or runtime error
 """
-# Self-reexec into the plugin's managed venv if the current interpreter
-# can't import kuzu. This lets the script work on systems where python3
-# is 3.14 (no Kuzu wheel) or PEP 668-locked. The venv is created by
-# scripts/graph/ensure-venv.sh (runs as SessionStart hook).
+# Self-reexec into a Python that has Kuzu installed. The first of these
+# candidates that exists AND can import kuzu wins:
+#   1. $CLAUDE_PLUGIN_DATA/venv (only set for hook/MCP/LSP subprocesses)
+#   2. Canonical plugin-data path (deterministic per CC docs)
+#   3. User-managed ~/.cc-master-venv (if created via operator setup)
+# If none work, we fall through and _load_kuzu() emits the standard error.
 import os as _os
 import sys as _sys
 try:
     import kuzu as _kuzu_probe  # noqa: F401
 except ImportError:
-    _data = _os.environ.get("CLAUDE_PLUGIN_DATA", "")
-    if _data:
-        _venv_py = _os.path.join(_data, "venv", "bin", "python3")
-        if _os.path.exists(_venv_py) and _os.path.realpath(_venv_py) != _os.path.realpath(_sys.executable):
-            _os.execv(_venv_py, [_venv_py, __file__, *_sys.argv[1:]])
+    _candidates = []
+    _env_data = _os.environ.get("CLAUDE_PLUGIN_DATA", "")
+    if _env_data:
+        _candidates.append(_os.path.join(_env_data, "venv", "bin", "python3"))
+    _candidates.append(_os.path.expanduser(
+        "~/.claude/plugins/data/cc-master-cc-master-marketplace/venv/bin/python3"
+    ))
+    _candidates.append(_os.path.expanduser("~/.cc-master-venv/bin/python3"))
+    _me = _os.path.realpath(_sys.executable)
+    for _py in _candidates:
+        if not _os.path.exists(_py):
+            continue
+        if _os.path.realpath(_py) == _me:
+            continue  # already running under this python
+        # Probe the candidate for kuzu before re-exec to avoid infinite loops
+        import subprocess as _sp
+        _probe = _sp.run([_py, "-c", "import kuzu"], capture_output=True)
+        if _probe.returncode == 0:
+            _os.execv(_py, [_py, __file__, *_sys.argv[1:]])
     # fall through — _load_kuzu() below will emit the standard error
 
 import argparse
