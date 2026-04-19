@@ -1248,6 +1248,16 @@ Exit with status:
 - `0` — `files_failed` empty and every count/close call succeeded.
 - Non-zero (`2`) — `files_failed` non-empty, or any count/close call failed.
 
+### Step 7: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 3:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
+
 ## --touch Single-File Refresh
 
 This section describes the execution path that runs when `--touch <file>` was supplied on the command line. It replaces Steps 4 and 5 (and Step 6's multi-file summary) with a scoped, single-file flow. Every other step of the skill — argument parsing, Kuzu availability check, bootstrap DDL, and the final database close — runs unchanged. This section is the end-to-end contract for that scoped flow; later subtasks that adjust touch behavior MUST edit it here, not by layering additional skip conditions onto Step 4 or Step 5.

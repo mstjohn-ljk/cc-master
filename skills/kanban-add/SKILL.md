@@ -51,11 +51,13 @@ This skill dedups new tasks against existing ones using a graph-backed read path
 Paste the following contract block verbatim before executing any Cypher query — the text is the required citation of `prompts/graph-read-protocol.md` and propagates the three pre-query checks, the one-warning-per-session rule, and the JSON-fallback fragment downstream.
 
 ```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
 Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
 .cc-master/<artifact>.json directly and computing the same result in memory.
 Print one warning line per session on first fallback:
@@ -526,6 +528,18 @@ prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
    ```
 
 7. Run the Post-Write Invalidation step per the `## Post-Write Invalidation` section — ONCE per Mode 3 invocation. Even though Mode 3 writes a single task, both the initial create from Step 4 AND any `--add-gh-issues` link-back metadata write from Step 5 count as kanban.json mutations; coalesce into a single `/cc-master:index --touch .cc-master/kanban.json` call at the end. If zero writes happened (the user selected `"Skip this one"` or `"Stop"` at Step 3), the touch MAY be skipped per the canonical contract's batch-coalescing rule (`prompts/kanban-write-protocol.md` → `## Batch Coalescing — One --touch Per Invocation`).
+
+## Output Indicator
+
+### Step 1: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from the `## Graph-Backed Dedup` section:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
 
 ## What NOT To Do
 

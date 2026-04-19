@@ -38,6 +38,26 @@ These rules apply to ALL argument parsing across this skill:
 
 ## Process
 
+### Step 0: Graph-Read Protocol Citation
+
+This skill is graph-backed — `.cc-master/kanban.json` (and the other `.cc-master/` JSON/markdown artifacts this skill consumes) are mirrored in the Kuzu graph index at `.cc-master/graph.kuzu`, and this skill invalidates the graph on write-completion per `prompts/kanban-write-protocol.md`. Paste the following contract block verbatim before any graph-backed read — the text is the required citation of `prompts/graph-read-protocol.md` and propagates the three pre-query checks, the one-warning-per-session rule, the `Graph: <state>` output-indicator requirement, and the verbatim JSON-fallback fragment downstream.
+
+```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
 ### Step 1: Validate & Prepare
 
 1. **Parse and validate all arguments.** URL is required — if missing, print `"Usage: stub-hunt <url> [--user <username> --pass <password>] [--cookie <name=value>]"` and stop.
@@ -256,6 +276,16 @@ Tasks created:
 
 Report: .cc-master/stub-hunt/<run-id>-report.json
 ```
+
+### Step 9: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 0:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
 
 ## Post-Write Invalidation
 
