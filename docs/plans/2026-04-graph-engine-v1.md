@@ -811,3 +811,116 @@ Kuzu's file-backed DB is accessed per-skill-invocation. Each invocation incurs o
 
 Can one graph index multiple repos? Useful for monorepo-across-git-repos organizations. Revisit when: a real use case from a user, not speculatively.
 
+## v0.21.0 Validation
+
+**Run date:** 2026-04-19T07:38:07Z (pipeline run); 2026-04-19T20:00:00Z (measurements roll-up — `validation-measurements.json` `measurements_date`)
+**Target project:** `/Users/mstjohn/Documents/SRC/LJK/cc-master` — dogfooded against cc-master itself (117 kanban tasks, 22 active top-level specs excluding `.cc-master/specs/archive-*/`). Selected over `SF` (67 tasks) and `escrow-domains-ui` (4 tasks) because it has the largest kanban, the richest spec corpus, is the repo in which the graph engine itself was developed, and satisfies spec #22 AC 6's "large real project" threshold of ≥20 kanban tasks.
+**Environment:** macOS 26.0.1 (Darwin 25.0.0, `Mac16,7`, arm64, 14 cores, 24 GiB RAM) / Python 3.13 via `/tmp/kuzu-venv/` (not the system Python 3.14.3) / ast-grep 0.42.1 / Kuzu 0.11.2 (installed as `kuzu==0.11.2` into the venv; verified by `/tmp/kuzu-venv/bin/python3 -c "import kuzu; print(kuzu.__version__)"` → `0.11.2`).
+**cc-master commit:** `cff23024549942c8abd30beaaa3a2fc3fb042de2` (branch `v2-graph-engine`, plugin version `0.21.0-dev.5`; finalizes to `0.21.0` in wave 9).
+
+**Validation method note.** This is a dogfooded run: the graph engine under test indexed the very repository that produced it, which is the most realistic possible fidelity for the cc-master skill chain but does conflate test subject and test harness — a future validation should add a second target (e.g. the `SF` project) for independent confirmation. Two shell-reachability gaps shaped the method. First, `kuzu==0.11.2` has no Python 3.14 wheel on PyPI and its sdist fails `python3 setup.py build_extension` under the Homebrew 3.14 toolchain (`make clean` exits 2); every measurement therefore runs under a Python 3.13 venv at `/tmp/kuzu-venv/` with `PATH="/tmp/kuzu-venv/bin:$PATH"` prepended so the scripts' `python3` resolves to the venv interpreter. Second, both `cc-master:index` (the cold-index driver) and its `--touch <file>` flag are Claude Code slash commands with no shell binary; the cold-index measurement uses a purpose-built 108-line driver at `/tmp/cc-master-index-driver.py` that invokes `scripts/graph/astgrep_walker.py` directly and upserts `File`/`Symbol`/`REFERENCES` to a fresh Kuzu DB, and the `--touch` measurement uses an embedded Python proxy at `/tmp/touch-proxy2.py` that times the minimum MERGE work. Both are explicit lower-bound proxies for the full skill path; neither writes the `Task`/`Subtask`/`Spec`/`Feature`/`Module`/`_source` families that the real `cc-master:index` populates. Findings below are annotated accordingly, and the two gaps are carried forward as v1.1 backlog entries under Regressions.
+
+### Token Reduction
+
+Measured via `scripts/graph/measure_kanban_savings.sh` and `scripts/graph/measure_spec_context_savings.sh` run from the repo root with the venv on PATH. Both scripts emit **family-level aggregates** against canonical fixtures (`tests/fixtures/kanban-500.json`, `tests/fixtures/specs-30/`) rather than per-skill before/after byte counts, so the table reports one row per skill family; the `Skills covered` column enumerates the 22 refactored skills that cite `prompts/kanban-write-protocol.md` or `prompts/graph-read-protocol.md` and therefore benefit from the reduction.
+
+| Family | Before (bytes) | After (bytes) | Reduction | Ratio | Design target | Skills covered |
+|--------|---------------:|--------------:|----------:|------:|:-------------:|----------------|
+| Kanban read (`kanban`, `kanban-add`, `build`, `complete`, `qa-review`, `qa-fix`, `qa-loop`, `pr-review`, `gap-check`, `align-check`, `release-docs`, `impact`) | 595,293 | 88,361 | 85.2% | **6.7×** | 5.0× | 12 skills |
+| Spec context read (`spec`, `build`, `qa-review`, `pr-review`, `impact`, `debug`, `trace`, `config-audit`, `api-payload-audit`, `perf-audit`) | 248,572 | 37,055 | 85.1% | **6.7×** | 5.0× | 10 skills |
+
+Both families clear the 5.0× design target (`validation-measurements.json → token_reduction.design_target_ratio`) with a 1.7× margin. The two family totals are independent; a skill that appears in both rows (`build`, `qa-review`, `pr-review`, `impact`) benefits from both reductions compounded.
+
+### Cold Full Index
+
+| Measurement | Value | Source |
+|-------------|------:|--------|
+| Wall time (total) | **6.9 s** | `validation-measurements.json → cold_index.wall_seconds` |
+| ast-grep walk | 0.541 s | `cold_index.breakdown_seconds.ast_grep_walk` |
+| Kuzu upsert | 6.375 s | `cold_index.breakdown_seconds.kuzu_upsert` |
+| Files indexed | 568 | `cold_index.files_indexed` |
+| Symbols indexed | 90 | `cold_index.symbols_indexed` |
+| REFERENCES edges | 153 (of 804 walker refs — 651 had `symbol_id: null` from unresolved cross-module imports) | `cold_index.references_indexed` + notes |
+| Graph-file size | 10.3 MB (single file, not directory — Kuzu 0.11.2 packs the DB into one file on this platform) | `du -sh .cc-master/graph.kuzu` |
+| Design target | ≤60 s hard gate, ≤30 s aspirational (Scaling envelope row 1) | This doc |
+| Result | **PASS — 53 s margin under the hard gate, 23 s margin under the aspirational target** | derived |
+
+Driver command:
+
+```
+CC_BENCH_REPO="$(pwd)" PATH="/tmp/kuzu-venv/bin:$PATH" \
+  bash scripts/graph/measure_code_graph_index.sh \
+  --invoke "/tmp/kuzu-venv/bin/python3 /tmp/cc-master-index-driver.py"
+```
+
+**Caveat.** The 108-line validation driver exercises the code-graph write path (`File`, `Symbol`, `REFERENCES`) but does **not** populate `Task`/`Subtask`/`Spec`/`Feature`/`Module`/`_source` — those are written by the full `cc-master:index` skill, which has no shell-invokable form in v0.21.0. The 6.9 s figure is therefore a lower bound on cold-index latency for code-graph-only scope; a full-fidelity measurement requires the driver work tracked under Regressions.
+
+### --touch Single-File Re-Index
+
+| Measurement | Value | Source |
+|-------------|------:|--------|
+| Wall time (median of 3) | **0.040 s** | `touch_reindex.wall_seconds` |
+| Run 1 / 2 / 3 | 0.0847 s / 0.0398 s / 0.0353 s | `touch_reindex.runs_seconds` |
+| Median breakdown — file read | 0.0001 s | `touch_reindex.breakdown_seconds_median.file_read` |
+| Median breakdown — db connect | 0.0115 s | `breakdown_seconds_median.db_connect` |
+| Median breakdown — MERGE upsert | 0.0069 s | `breakdown_seconds_median.merge_upsert` |
+| Median breakdown — close | 0.0213 s | `breakdown_seconds_median.close` |
+| Design target | ≤200 ms (Scaling envelope row 2) | This doc |
+| Result | **PASS — 5× under target** (caveat below) | derived |
+
+**Caveat.** `kuzu_client.py --help` exposes only `init`, `query`, and `close` subcommands — there is no `--touch` subcommand, and the `--touch <file>` flag on `cc-master:index` is only reachable via the slash command, not shell. The number above comes from `/tmp/touch-proxy2.py`, which times `read kanban.json → open DB → MERGE (:File {path}) → close` — the minimum work a real `--touch` would perform on a single file. It excludes the secondary `Task`/`Subtask`/`BLOCKED_BY` rewrites the real `--touch .cc-master/kanban.json` would perform after a kanban write, and it therefore **understates** true latency. The warm re-run number from subtask #115's pipeline log (6.9 s) must **not** be quoted as `--touch` latency — that was a full repo re-walk by the same 108-line driver used for cold index. A shell-invokable `cc-master:index --touch` driver is the only way to measure the real number; it is carried forward as Regression #2.
+
+### cc-master:impact Accuracy
+
+| Test | Symbol | Ground truth | Graph result | Precision | Recall |
+|------|--------|-------------:|-------------:|----------:|-------:|
+| Intra-file (defined and called in the same Python file) | `_load_kuzu` in `scripts/graph/kuzu_client.py` | 12 (3 defs + 9 call lines across the primary file and its two worktree copies) | 12 | **1.0** | **1.0** |
+| Cross-file (defined in one module, called from another) | `classify_test_file` defined at `scripts/graph/astgrep_walker.py:153` | 22 (2 same-file calls at lines 233, 631 + 20 cross-file calls in `scripts/graph/test_astgrep_walker.py`) | 2 (same-file only) | 1.0 | 1.0 same-file / **0.0 cross-file** / **0.091 overall** |
+
+Global graph context: a `MATCH (f:File)-[r:REFERENCES]->(s:Symbol) WHERE f.path <> s.file RETURN count(*)` returned `0` out of 306 total `REFERENCES` edges. The v1 graph contains **zero** cross-file references.
+
+**Interpretation.** Precision stays at 1.0 across both tests — every edge the graph produces is a real call site in the source — but recall collapses from 1.0 to 0.0 the moment the call crosses a file boundary. This is the documented ast-grep v1 limitation: the walker matches call-site symbols textually and cannot resolve cross-module imports back to the defining `Symbol` node. The MEMORY.md "~80% accuracy" figure is an upper bound that holds when most references are intra-file; cc-master's heavier cross-file coupling via Python imports produces a worse recall profile. The v1 graph is therefore reliable for same-file impact analysis and refactor safety checks, but cross-module blast radius requires either (a) disclosing the limitation in the `impact` output or (b) the **SCIP swap scheduled for v0.22**, which replaces the ast-grep walker while preserving the Kuzu schema (`Task` #27 in the v1.1 backlog; schema-preserving so consumers do not change). v0.22 is expected to produce a non-trivial cross-file `REFERENCES` count on this same target.
+
+### Graceful Degradation
+
+Tested by moving `.cc-master/graph.kuzu` aside and invoking a read path:
+
+```
+mv .cc-master/graph.kuzu .cc-master/graph.kuzu.offline
+PATH="/tmp/kuzu-venv/bin:$PATH" python3 scripts/graph/kuzu_client.py \
+  query .cc-master/graph.kuzu "MATCH (f:File) RETURN count(f) AS n"
+echo "exit=$?"
+mv .cc-master/graph.kuzu.offline .cc-master/graph.kuzu
+```
+
+Captured output:
+
+```
+{"error": "database not found at /Users/mstjohn/Documents/SRC/LJK/cc-master/.cc-master/graph.kuzu"}
+exit=3
+```
+
+Exit code **3** matches the declared contract in `scripts/graph/README.md` (Exit codes table, "3 — Database path not found"). The Read Protocol's Check 1 (graph directory exists) therefore triggers deterministically on an absent graph.
+
+**Indicator-contract verification.** The contract requires three literal strings (`Graph: fresh`, `Graph: stale — fell back to JSON`, `Graph: absent — fell back to JSON`) plus a First-run check and an Emit Graph Output Indicator step in every refactored skill. Verified against `skills/kanban/SKILL.md` on the v2-graph-engine branch (`validation-measurements.json → graceful_degradation.skill_md_lines`):
+
+| Contract element | Line |
+|------------------|-----:|
+| First-run check | 38 |
+| Step 6 "Emit Graph Output Indicator" header | 234 |
+| Literal `Graph: fresh` | 238 |
+| Literal `Graph: stale — fell back to JSON` | 239 |
+| Literal `Graph: absent — fell back to JSON` | 240 |
+| Default-on-error clause (emit `absent` string if a pre-query check errored) | 242 |
+
+The `kanban` skill is representative of the 22 refactored skills — wave 8's indicator wiring (task #20) holds.
+
+### Regressions
+
+Two unmet or proxy-only items versus the design targets; both are known limitations with concrete fixes planned for v0.22 / v1.1.
+
+| # | Measurement | Observed | Expected | Severity | Follow-up task (v1.1 backlog) |
+|---|-------------|----------|----------|----------|-------------------------------|
+| 1 | `impact` cross-file recall (`impact_accuracy.cross_file.recall_cross_file`) | 0.0 (0 of 306 `REFERENCES` edges are cross-file) | Non-zero for cross-module Python calls; MEMORY.md cites ~80% accuracy as ast-grep v1's upper bound | known-limitation | Swap the ast-grep walker for SCIP-based symbol resolution in v0.22 while preserving the Kuzu schema (`File`/`Symbol`/`REFERENCES` consumers unchanged). Re-run the `classify_test_file` cross-file test on the same commit and expect recall to rise from 0.0 toward the ~0.8 target. |
+| 2 | `--touch` true single-file latency (`touch_reindex.true_single_file_latency`) | Proxy only (0.040 s median via embedded MERGE timer); no shell-reachable driver for `cc-master:index --touch <file>` | End-to-end `cc-master:index --touch <file>` wall-time against the real skill code path, including `Task`/`Subtask`/`BLOCKED_BY` rewrites on a `kanban.json` touch | instrumentation-gap | Expose `--touch <file>` as a `scripts/graph/kuzu_client.py` subcommand (mirroring `init`/`query`/`close`) OR ship a shell-invokable non-interactive driver for `cc-master:index` so future validation runs can measure the real single-file re-index without an embedded Python proxy. Required before any future "200 ms hard gate" re-attest. |
+

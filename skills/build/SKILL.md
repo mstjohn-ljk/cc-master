@@ -51,6 +51,24 @@ These rules apply to ALL argument parsing across this skill:
 
 ### Step 1: Identify What to Build
 
+**Graph-backed read contract.** Before any graph query this skill may issue during this step or any later step (including the nested `cc-master:impact` invocations described in Step 4b and any direct Cypher issued from the build orchestrator), the following contract block from `prompts/graph-read-protocol.md` applies verbatim:
+
+```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
 The task is specified via arguments:
 - A single task ID: `build 3` or `build #3`
 - A spec file: `build .cc-master/specs/add-auth.md`
@@ -526,13 +544,13 @@ If API calls were touched:
    - In manual mode: present findings and suggest running `cc-master:api-contract --fix`
 4. If the contract passes (score >= 70, zero CRITICALs):
    - Print: `"API contract verification PASSED (score: N)."`
-   - Continue to Step 8
+   - Continue to Step 9
 
 This prevents the exact class of bugs where build agents write code with wrong API paths, parameter names, or response shapes that compile fine but fail at runtime.
 
 ### Step 7d: Mandatory Post-Build Trace
 
-**MANDATORY: Execute this step for every task where verification PASSED in Step 6.** This step MUST complete before proceeding to Step 8.
+**MANDATORY: Execute this step for every task where verification PASSED in Step 6.** This step MUST complete before proceeding to Step 9.
 
 Run `cc-master:trace` on the primary feature that was just built. Determine the trace target:
 1. Read the spec's "Files to Modify" section — use the first entry that is a route, handler, controller, or CLI command entry as the trace entry point.
@@ -545,7 +563,7 @@ Invoke the Skill tool with `skill: "cc-master:trace"` and `args: "<entry-point-o
 Read the trace JSON. Check the `status` field and `findings` array.
 
 **If the trace status is `broken_chain` or any finding has severity `CRITICAL` or `HIGH`:**
-- Do NOT proceed to Step 8 (qa-review chain)
+- Do NOT proceed to Step 9 (qa-review chain)
 - Print:
   ```
   Post-build trace FAILED: <status>
@@ -564,11 +582,21 @@ Read the trace JSON. Check the `status` field and `findings` array.
 - Store the trace path in the task's metadata: update kanban.json with `metadata.post_build_trace = "traces/<slug>.json"`
 - After this write completes, perform Post-Write Invalidation per the `## Post-Write Invalidation` section.
 - Print: `"Post-build trace PASSED: all_connected, no critical/high findings."`
-- Proceed to Step 8
+- Proceed to Step 9
 
-**In multi-task mode:** Run the trace for each passing task sequentially before entering the autonomous pipeline in Step 8. If any task's trace fails, exclude it from the passing set (same as a verification failure).
+**In multi-task mode:** Run the trace for each passing task sequentially before entering the autonomous pipeline in Step 9. If any task's trace fails, exclude it from the passing set (same as a verification failure).
 
-### Step 8: Chain Point / Autonomous Pipeline
+### Step 8: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 1:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
+
+### Step 9: Chain Point / Autonomous Pipeline
 
 **Single-task mode — Chain Point (unchanged):**
 

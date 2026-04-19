@@ -16,6 +16,59 @@ Every graph-backed skill MUST execute these three checks, in this order, before 
 
 A skill that passes Check 1 and 2 but fails Check 3 MUST NOT retry the query against the graph in the same session. Retrying masks real corruption and wastes tokens on the same failure. Fall back and proceed.
 
+## First-Run Prompt
+
+When `.cc-master/` exists but `.cc-master/graph.kuzu` does not, graph-backed skills MUST print the prompt exactly once per session on the first graph-read attempt. This is the centralized migration prompt — every graph-backed skill shares identical wording and identical decline semantics so the operator sees one coherent behavior across the entire pipeline. The `cc-master:index` skill itself is EXEMPT — when it is invoked on a cold project it builds the graph directly; it does not prompt.
+
+The prompt text is verbatim:
+
+```
+Graph index not found at .cc-master/graph.kuzu/. Build now? (~30s for a medium project) [y/N]
+```
+
+Followed by a single-line follow-up printed on the next line, verbatim:
+
+```
+Decline → fall back to JSON for the remainder of this session.
+```
+
+1. **Accept path (`y` or `yes`, case-insensitive).** Invoke the Skill tool with the LITERAL strings `skill: "cc-master:index"` and `args: "--full"`. Wait for the invocation to complete. On success, retry the graph query from Check 1 onward — Check 1 now passes because the graph exists, Check 2 computes fresh hashes against the newly stamped `_source` rows, Check 3 runs the Cypher query against the now-populated database. If `cc-master:index --full` itself returns a non-zero exit code (binding missing, build error, etc.), fall back to JSON and emit the standard one-warning-per-session line. MUST NOT retry `cc-master:index` and MUST NOT enter a build loop.
+
+2. **Decline path (`n`, anything else, empty input).** Set an in-session flag `graph_first_run_declined = true`. The flag exists only for the lifetime of the current skill invocation chain — it is not persisted to disk. All subsequent graph-read attempts in the same session MUST skip the prompt entirely and fall straight through to JSON fallback with the standard one-warning-per-session line. A skill that re-prompts after a decline is wrong, even if the operator re-invokes the same skill — the flag answers the question for the rest of the session.
+
+3. **`--auto` mode.** When the invoking skill is run with `--auto` in its arguments, the skill MUST NOT print the prompt under any circumstance. It silently falls back to JSON and emits the standard one-warning-per-session line. `--auto` mode is for non-interactive pipelines where blocking on operator input is unacceptable; the prompt would hang the pipeline forever. Treat an absent graph under `--auto` as an automatic decline.
+
+4. **`cc-master:index` exemption.** `cc-master:index` is the skill that builds the graph. It MUST NOT print the first-run prompt — when invoked on a cold project it proceeds directly to indexing. Every other graph-backed skill in the cc-master pipeline (align-check, api-payload-audit, build, complete, config-audit, config-sync, debug, doc-review, gap-check, impact, insights, kanban, kanban-add, perf-audit, pr-review, qa-loop, qa-review, qa-ui-review, release-docs, research, smoke-test, spec, stub-hunt, trace) MUST follow this prompt contract.
+
+The prompt fires at most once per session. Once fired — whether accepted, declined, or silenced by `--auto` — the outcome governs every subsequent graph-read attempt in the same session. A skill that fires the prompt a second time in the same session is wrong.
+
+## Output Indicator
+
+Every graph-backed cc-master skill MUST emit a single-line status indicator on its final output reporting whether the graph was consulted, whether it was fresh, and whether the skill fell back to JSON. The indicator gives the operator a one-glance verdict on which path ran. Wording is fixed across all 25 graph-backed skills so the operator reads the same three strings everywhere.
+
+1. **Indicator strings — verbatim, no variants.** The three values are the complete permitted set. No prefix, no suffix, no emoji, no color marker, no trailing punctuation. Copy the literal characters — the em-dash is U+2014, not two hyphens.
+
+   ```
+   Graph: fresh
+   Graph: stale — fell back to JSON
+   Graph: absent — fell back to JSON
+   ```
+
+2. **Footer placement rule.** The indicator MUST be the last line of the skill's primary summary output, printed before any chain-point prompt. If the skill emits multiple artifacts (e.g., `build` produces kanban updates AND a summary), the indicator appears at the bottom of the single primary summary block — it MUST NOT be duplicated per artifact. A skill that prints the indicator twice in the same invocation is wrong.
+
+3. **State-detection logic.** The state is derived from the pre-query check outcomes recorded during this invocation; it is NEVER a hardcoded string pasted as a literal footer.
+   - `Graph: fresh` — all three Pre-Query Checks passed for every dependent artifact; the Cypher path served the result.
+   - `Graph: stale — fell back to JSON` — Check 2 hash mismatch triggered fallback for at least one dependent artifact during this invocation. Any post-check Cypher failure that forced a fallback during the same invocation also maps to `stale`.
+   - `Graph: absent — fell back to JSON` — Check 1 reported the `.cc-master/graph.kuzu` path missing, so no Cypher query was attempted.
+
+4. **Worst-state-wins rule (priority: absent > stale > fresh).** When a single query depends on multiple artifacts and their per-artifact states differ, the skill MUST report the worst observed state. Example: `kanban.json` fresh, `discovery.json` hash mismatched → `Graph: stale — fell back to JSON`. Example: graph directory missing and a spec hash would also mismatch → `Graph: absent — fell back to JSON`. Do NOT average, do NOT report per-artifact lines — emit one indicator for the whole invocation using the worst state seen.
+
+5. **`--auto` and chained modes still print the indicator.** Silence is reserved for the first-run prompt (see `## First-Run Prompt`); status reporting is not silenced. A skill running under `--auto` that fell back to JSON MUST still emit `Graph: absent — fell back to JSON` (or `stale`, as applicable) as its final line. Pipelines rely on the indicator to tell accepted-path runs from fallback runs.
+
+6. **Non-graph-backed skills MUST NOT print the indicator.** The indicator is a truthful report about a graph-read attempt. A skill that never touches `.cc-master/graph.kuzu/` has no state to report and MUST NOT emit any of the three strings — emitting one would be a lie about what the skill did.
+
+7. **Error-phase default.** If the pre-query check phase itself errors before a state can be determined (e.g., `.cc-master/` unreadable), the indicator defaults to `Graph: absent — fell back to JSON`. NEVER omit the indicator silently on an error path — the operator must see that the graph was not consulted.
+
 ## Failure Modes
 
 The following failure conditions are the full enumerated set of pre-query failures a read-side skill can encounter. Each maps to exactly one fallback action.
@@ -103,11 +156,13 @@ When any of these invariants conflict with a performance target or a user-visibl
 Every graph-backed cc-master skill MUST paste the following block verbatim into its `## Process` section at the first step that consumes `.cc-master/graph.kuzu/`. The block cites this contract, restates the three pre-query checks, states the one-warning-per-session rule, and carries the verbatim JSON-fallback fragment downstream. Pasting the block is how the contract propagates — a skill that paraphrases the block is not citing the contract, it is inventing its own.
 
 ```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
 Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
 .cc-master/<artifact>.json directly and computing the same result in memory.
 Print one warning line per session on first fallback:
@@ -116,4 +171,4 @@ Do NOT retry the graph query during the same session once fallback has
 started — retries mask real corruption and waste tokens.
 ```
 
-The citation line is the single-line summary an operator or reviewer sees first; the three check restatements make the contract auditable inside the skill itself; the one-warning rule prevents terminal spam; the JSON-fallback fragment (copied verbatim from `## JSON Fallback Template`) is the exact behavior downstream consumers depend on. All four elements MUST appear together — a partial paste is a contract violation.
+The first-run check line is the single-line pointer to the `## First-Run Prompt` section and runs before Check 1 on any invocation where `.cc-master/graph.kuzu` is absent; the citation line is the single-line summary an operator or reviewer sees first; the three check restatements make the contract auditable inside the skill itself; the one-warning rule prevents terminal spam; the indicator-emission line binds the skill to print the `Graph: <state>` output indicator per the `## Output Indicator` section as the last line of its primary summary; the JSON-fallback fragment (copied verbatim from `## JSON Fallback Template`) is the exact behavior downstream consumers depend on. All six elements MUST appear together — a partial paste is a contract violation.

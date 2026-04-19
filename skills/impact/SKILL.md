@@ -107,11 +107,13 @@ Resolve the raw argument string to a `{type, value}` pair that Steps 2 and 3 con
 This skill is graph-backed and has NO JSON fallback. Paste the following contract block verbatim before executing any Cypher query — the text is the required citation of `prompts/graph-read-protocol.md` and propagates the three pre-query checks, the one-warning-per-session rule, and the JSON-fallback fragment downstream. The fragment is preserved verbatim even though it does not apply to this skill, because the contract propagation is what earns the citation; the no-JSON-fallback exception that follows the block is what overrides it locally.
 
 ```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
 Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
 Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
 Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
 Check 3 — the Cypher query executes cleanly via `scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
 Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
 If any pre-query check above fails for this query, fall back to reading
 .cc-master/<artifact>.json directly and computing the same result in memory.
 Print one warning line per session on first fallback:
@@ -670,6 +672,16 @@ With the containment check passed, perform these actions in order:
    where `<slug>` matches the slug computed above.
 
 After the "Written" line, stop. The skill invocation is complete.
+
+### Step 6: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 2:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
 
 ## Chain Point
 
