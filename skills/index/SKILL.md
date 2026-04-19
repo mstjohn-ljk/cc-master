@@ -457,453 +457,83 @@ Interpret the exit code as follows:
   Do NOT attempt to continue past this point. Do NOT call `kuzu_client.py` — it would only repeat the same failure (exit code 2) and produce a redundant error. The user must restart their Claude Code session to trigger the SessionStart hook.
 - **Any other exit code:** treat as a bug in `check_kuzu.sh` — print the captured stdout and stderr verbatim so the user can report the failure, then exit non-zero.
 
-### Step 3: Ensure Graph Exists (Bootstrap DDL)
+### Step 3: Ensure Graph Exists (Bootstrap DDL) — DELEGATED TO run_index.py
 
-The graph database lives at `.cc-master/graph.kuzu/` (a directory Kuzu manages). The DDL below is the v1 schema of record; it mirrors the node and edge definitions in `docs/plans/2026-04-graph-engine-v1.md` (see "Node schema" and "Edge schema" sections). If the DDL here and the design doc ever diverge, the design doc is authoritative — stop and reconcile before writing Cypher.
+`${CLAUDE_PLUGIN_ROOT}/scripts/graph/run_index.py` bootstraps the Kuzu database at `.cc-master/graph.kuzu/` idempotently on every run — it creates the database directory if absent, executes every `CREATE NODE TABLE IF NOT EXISTS` / `CREATE REL TABLE IF NOT EXISTS` statement from its internal `DDL_STATEMENTS` constant, and applies additive `ALTER TABLE … ADD <col>` migrations for columns introduced after v0.21.0 (`Task.competitor_insight_ids`, `Task.phase`, `Subtask.competitor_insight_ids`, `Subtask.phase`). Step 3 is therefore effectively a no-op for the skill executor — the single `run_index.py` invocation in Step 4-6 performs all DDL before any parsing or upsert. The section is retained for explicit visibility so a reader tracing the pipeline end-to-end can see where the schema contract lives.
 
-All Kuzu operations in this step shell out to `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. Its exit-code contract is:
+The authoritative v1 schema is `docs/plans/2026-04-graph-engine-v1.md` (see "Node schema" and "Edge schema"). The seven v1 node tables (Task, Subtask, Spec, Feature, Module, File, Symbol), the seven v1 edge tables (HAS_SUBTASK, HAS_SPEC, BLOCKED_BY, IMPLEMENTS, TOUCHES, CONTAINS, REFERENCES), and the `_source` bookkeeping table are all provisioned by `run_index.py` on every invocation. If DDL bootstrap fails, `run_index.py` exits non-zero and Step 4-6's exit-code contract below surfaces the error — no separate pre-flight DDL check runs from the skill.
+
+### Step 4-6: Invoke bulk indexer and surface summary
+
+Steps 4 (absent-file sweep), 5.0 through 5.3c (JSON-artifact full-replace upsert, `_source` hash tracking, DDL bootstrap), and 6 (summary emission) collapse into one invocation of `${CLAUDE_PLUGIN_ROOT}/scripts/graph/run_index.py`. The script runs in a single Python process that opens one Kuzu connection, performs DDL bootstrap, sweeps absent files, parses the canonical JSON artifacts + every non-archived spec, applies the per-file hash-compare skip, full-replaces changed files, upserts `_source` rows, and emits one line of summary JSON to stdout. This skill invokes the script once, parses its JSON summary, formats the human-readable summary line in Step 6 below, and exits.
+
+Step 5.4 (the ast-grep code-graph walk) is NOT implemented by `run_index.py` and is invoked separately by this skill — see its unchanged subsection below.
+
+**Invocation.**
+
+Run the script via the Bash tool. The flag set depends on the values captured in Step 1:
+
+```
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/graph/run_index.py <flags>
+```
+
+Flag derivation:
+
+- Default pass (`full = false`, `module = null`, `code_graph = false`, `touch_target = null`) → no flags.
+- `--full` set → pass `--full` to `run_index.py`. This forces every JSON-sourced file through the full-replace path regardless of `_source.content_hash`. Surfaces the `(--full: forced re-index)` prefix on the Step 6 summary line.
+- `--touch <file>` set → pass `--touch <file>` with the canonicalized relative path produced by Substep 1.5b (always `.cc-master/...`). `run_index.py` handles the single-file flow internally — see the `## --touch Single-File Refresh` section below for the same contract applied to `--touch`.
+- `--module <name>` set → do NOT invoke `run_index.py` at all. `--module` narrows the pass to a single module's code-graph walk; no JSON artifact re-parse is needed. Skip straight to Step 5.4 with the single-element module list `[<name>]`.
+- `--code-graph` set without `--full` → do NOT pass `--code-graph` to `run_index.py` (the script has no such flag). The script still runs for JSON artifacts with the default hash-compare skip in effect, and Step 5.4 runs separately afterward. If `--code-graph` is set alongside `--full`, the informational line `"--code-graph is implied by --full; no-op."` was already printed in Substep 1.5; invoke `run_index.py --full` and proceed.
+- Always append `--verbose` when the user asked for verbose output.
+- NEVER pass `--dry-run` in production runs. `--dry-run` is operator-diagnostics only — if the user passes it explicitly, forward it; the skill itself never adds it.
+
+**Exit-code contract.**
+
+`run_index.py` exits with one of the following codes. The stderr JSON payload on every non-zero exit is of the shape `{"error": "<msg>", "hint": "<optional>"}`.
 
 | Exit | Meaning | Skill response |
 |------|---------|----------------|
-| 0 | Success — JSON on stdout | Proceed. |
-| 1 | Argument parsing or unexpected exception | Print the stderr JSON verbatim and exit non-zero; this indicates the skill invoked the CLI wrong and is a skill bug to fix. |
-| 2 | Kuzu binding missing | Should not happen — Step 2 already enforced the binding. If it does, print the install message from Step 2 and exit non-zero; treat this as Step 2 being incorrectly bypassed. |
-| 3 | Database path not found | Should not happen after `init` — surface as a bug. Print: `"Kuzu database at .cc-master/graph.kuzu/ disappeared between init and query. This indicates a concurrent filesystem change or a skill bug — re-run cc-master:index to rebuild."` and exit non-zero. |
-| 4 | Cypher parse or runtime error | Print the stderr JSON (which contains `{"error": "<msg>"}`) verbatim prefixed with `"Kuzu rejected DDL statement: "` and the offending statement, then exit non-zero. A schema bump likely requires updating this skill to match. |
+| 0 | Success | Parse the single-line JSON on stdout. Feed the counters to Step 6's formatter. |
+| 2 | Kuzu binding missing | Print the stderr JSON verbatim, then append the literal `INSTALL_MSG` hint (the multi-line message from Step 2's Exit-2 branch). Exit the skill non-zero. Do NOT retry — the SessionStart hook must have been skipped; user must restart Claude Code. |
+| 3 | Database corruption | Print the stderr JSON verbatim, prefixed with `"Kuzu database at .cc-master/graph.kuzu/ is corrupted or unreadable: "`. Suggest the recovery path: `"Recovery: rm -rf .cc-master/graph.kuzu/ && /cc-master:index --full (the graph is a derived index; JSON source of truth is intact)."` Exit non-zero. |
+| 4 | Parser error | Print the stderr JSON verbatim, prefixed with `"Parser error: "`. The offending file path is named in the stderr `error` field (e.g., `"parser error: .cc-master/kanban.json is malformed JSON: Expecting value line 1 column 1"`). Exit non-zero. No Cypher ran — the graph is unchanged. |
+| 1 or any other non-zero | Unexpected failure | Print the raw stderr verbatim prefixed with `"run_index.py failed (exit <code>): "`. Abort the pass; do NOT proceed to Step 5.4. |
 
-**Step 3.1 — Initialize the database if absent.**
+**Stdout JSON summary schema.**
 
-Check whether `.cc-master/graph.kuzu/` exists (as a directory). If it does not:
+On exit 0, `run_index.py` prints one JSON object (and ONLY one, on its own line) to stdout:
 
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py init .cc-master/graph.kuzu
-```
-
-Expect exit code 0 and a single JSON object on stdout of the form:
-
-```
-{"status":"ok","db_path":"<absolute path>","kuzu_version":"0.11.2"}
-```
-
-If the exit code is non-zero, follow the contract table above. If the JSON does not parse or `status` is not `"ok"`, print: `"Kuzu init succeeded but returned unexpected payload: <raw stdout>"` and exit non-zero.
-
-If the directory already exists, skip the `init` call — Kuzu's `init` is idempotent in practice, but avoiding it when unnecessary keeps the skill's runtime predictable and keeps reruns fast.
-
-**Step 3.2 — Execute each DDL statement.**
-
-Run each of the following statements, in the order listed, via a separate invocation:
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "<statement>"
-```
-
-Every statement uses `IF NOT EXISTS`, making the step fully idempotent — re-running the skill on an already-bootstrapped graph is a no-op at the schema layer.
-
-1. `CREATE NODE TABLE IF NOT EXISTS Task(id INT64, subject STRING, status STRING, priority STRING, source STRING, owner STRING, created_at TIMESTAMP, updated_at TIMESTAMP, source_file STRING, competitor_insight_ids STRING[], phase STRING, PRIMARY KEY (id))`
-2. `CREATE NODE TABLE IF NOT EXISTS Subtask(id INT64, parent_id INT64, subject STRING, status STRING, blocked_by INT64[], spec_file STRING, wave INT64, created_at TIMESTAMP, updated_at TIMESTAMP, source_file STRING, competitor_insight_ids STRING[], phase STRING, PRIMARY KEY (id))`
-3. `CREATE NODE TABLE IF NOT EXISTS Spec(task_id INT64, file_path STRING, has_production_readiness BOOLEAN, has_verified_contracts BOOLEAN, touches_modules STRING[], updated_at TIMESTAMP, source_file STRING, PRIMARY KEY (task_id))`
-4. `CREATE NODE TABLE IF NOT EXISTS Feature(id STRING, title STRING, priority STRING, status STRING, phase STRING, complexity STRING, impact STRING, delivered_at TIMESTAMP, source_file STRING, PRIMARY KEY (id))`
-5. `CREATE NODE TABLE IF NOT EXISTS Module(name STRING, path STRING, language STRING, file_count INT64, source_file STRING, PRIMARY KEY (name))`
-6. `CREATE NODE TABLE IF NOT EXISTS File(path STRING, module STRING, language STRING, content_hash STRING, size INT64, is_test BOOLEAN, last_indexed TIMESTAMP, source_file STRING, PRIMARY KEY (path))`
-7. `CREATE NODE TABLE IF NOT EXISTS Symbol(id STRING, name STRING, kind STRING, file STRING, line INT64, module STRING, source_file STRING DEFAULT 'ast-grep-walk', last_indexed TIMESTAMP, PRIMARY KEY (id))`
-8. `CREATE REL TABLE IF NOT EXISTS HAS_SUBTASK(FROM Task TO Subtask)`
-9. `CREATE REL TABLE IF NOT EXISTS HAS_SPEC(FROM Task TO Spec)`
-10. `CREATE REL TABLE IF NOT EXISTS BLOCKED_BY(FROM Task TO Task, FROM Task TO Subtask, FROM Subtask TO Task, FROM Subtask TO Subtask)`
-11. `CREATE REL TABLE IF NOT EXISTS IMPLEMENTS(FROM Task TO Feature)`
-12. `CREATE REL TABLE IF NOT EXISTS TOUCHES(FROM Spec TO Module, intent STRING)`
-13. `CREATE REL TABLE IF NOT EXISTS CONTAINS(FROM Module TO File)`
-14. `CREATE REL TABLE IF NOT EXISTS REFERENCES(FROM File TO Symbol, line INT64, context STRING, kind STRING, source_file STRING DEFAULT 'ast-grep-walk')`
-15. `CREATE NODE TABLE IF NOT EXISTS _source(file_path STRING, content_hash STRING, last_indexed_at TIMESTAMP, node_count INT64, edge_count INT64, indexer_version STRING, PRIMARY KEY (file_path))`
-
-Statements 1-7 define the seven v1 node tables (Task, Subtask, Spec, Feature, Module, File, Symbol). Statements 8-14 define the seven v1 edge tables (HAS_SUBTASK, HAS_SPEC, BLOCKED_BY, IMPLEMENTS, TOUCHES, CONTAINS, REFERENCES). Statement 15 provisions the `_source` metadata table — the hash-diff bookkeeping surface that Step 4 (absence handling) and Step 5 (hash-compare skip and `_source` upsert) use to decide whether a source artifact has changed since the last index pass.
-
-Statement 7 (Symbol) and statement 14 (REFERENCES) are the code-graph layer added in wave 6. Their column lists, types, primary key, and `source_file` defaults (`'ast-grep-walk'`) mirror the Symbol node and REFERENCES edge sections of `docs/plans/2026-04-graph-engine-v1.md` exactly (see "### Symbol" at line 206 and "### REFERENCES" at line 335 of the design doc). Both tables are created unconditionally at bootstrap even on projects that never invoke the code-graph pass — the DDL is cheap, `IF NOT EXISTS` is idempotent, and provisioning them at bootstrap keeps later `--code-graph` / `--full` invocations from needing a schema-migration detour. The `source_file DEFAULT 'ast-grep-walk'` clause is authoritative: every Symbol and every REFERENCES row written by Step 5.4 stamps that literal string so the absence-handling branch in Step 4.2 (pseudo-path `ast-grep-walk:<module-name>`) finds every row owned by the walker.
-
-On any non-zero exit from a `kuzu_client.py query` call, follow the contract table above. The offending statement is the one currently being executed — include it in the error output so the user (or the next skill iteration) can see exactly which DDL failed.
-
-**Step 3.2a — Schema drift detection and in-place ALTER migration.**
-
-`CREATE NODE TABLE IF NOT EXISTS` is idempotent by table *name* only — if a table was created by an older version of this skill that did not yet know about a newer column (e.g., a graph built before the `competitor_insight_ids` and `phase` columns were added to Task/Subtask), `IF NOT EXISTS` returns "already exists" and the older table definition is kept. The table therefore survives the upgrade with a stale column list, and Step 5.3 Phase B's CREATE with the new parameter set fails at runtime with a Kuzu property-not-found error.
-
-This substep detects that drift and heals it in place using Kuzu's `ALTER TABLE … ADD <col> <type>` DDL. The ALTER path was verified against `kuzu==0.11.2` on 2026-04-18 with the following reproduction (captured verbatim for the record):
-
-```
-$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py init /tmp/kuzu-alter-test-72732
-{"status": "ok", "db_path": "/private/tmp/kuzu-alter-test-72732", "kuzu_version": "0.11.2"}
-$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "CREATE NODE TABLE TestNode(id INT64, PRIMARY KEY (id))"
-[{"result": "Table TestNode has been created."}]
-$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "ALTER TABLE TestNode ADD foo STRING"
-[{"result": "Property foo added to table TestNode."}]   # exit 0
-$ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query /tmp/kuzu-alter-test-72732 "MATCH (n:TestNode) RETURN n.foo AS foo"
-[]                                                      # exit 0 — column readable, zero rows as expected
+```json
+{
+  "mode": "full" | "touch" | "default",
+  "touch_target": "<path>" | null,
+  "files_total": <int>,
+  "files_changed": <int>,
+  "files_unchanged": <int>,
+  "files_failed": <int>,
+  "files_absent_swept": <int>,
+  "nodes_deleted": <int>,
+  "nodes_inserted": <int>,
+  "edges_deleted": <int>,
+  "edges_inserted": <int>,
+  "hash_errors": <int>,
+  "warnings": [<str>, ...],
+  "duration_ms": <int>,
+  "indexer_version": "<plugin.json version>",
+  "kuzu_version": "<kuzu.__version__>",
+  "dry_run": <bool>
+}
 ```
 
-Because ALTER is supported, the skill uses an additive in-place migration — no full rebuild is forced on the user when a new column is introduced.
+Capture this object as `run_index_summary` in memory — every counter Step 6 renders comes from this payload, and every warning in the `warnings` array is surfaced after the summary line on its own stderr line.
 
-Run this substep AFTER every `CREATE NODE TABLE IF NOT EXISTS` in Step 3.2 has executed. For each `(table, column, kuzu_type)` tuple in the **Expected columns** list below:
+**Step 5.4 orchestration (separate).**
 
-1. Probe the column with a read query:
+If `--full` OR `--code-graph` OR `--module <name>` was set in Step 1, invoke Step 5.4 (`${CLAUDE_PLUGIN_ROOT}/scripts/graph/astgrep_walker.py`) AFTER `run_index.py` completes. Step 5.4 runs as the second script invocation in the pass; the bulk indexer provides the up-to-date Module node set that Step 5.4 walks. Under `--module`, Step 5.4 is the ONLY script the skill invokes — `run_index.py` was skipped per the flag derivation above. Under `--full` and `--code-graph`, Step 5.4 orchestrates every `discovery.json` Module. The existing Step 5.4 body below is the canonical contract; do NOT duplicate its per-phase logic here.
 
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (n:<Table>) RETURN n.<column> LIMIT 1"
-   ```
+Step 5.4 still writes its own `_source` rows keyed by the pseudo-path `ast-grep-walk:<module-name>`. Those rows and their absence-handling are handled by Step 5.4 itself, not `run_index.py` — `run_index.py` does not touch any `_source` row whose `file_path` begins with `ast-grep-walk:`.
 
-2. Interpret the result:
-   - **Exit 0 (any row count, including zero rows):** the column exists. Move to the next tuple.
-   - **Exit 4 with an error message matching "property … not found" / "no such property" (Kuzu phrasings vary by version; a substring search for `"not found"` or `"does not exist"` is the robust match):** the column is missing. Issue:
-
-     ```
-     python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-       "ALTER TABLE <Table> ADD <column> <kuzu_type>"
-     ```
-
-     Expect exit 0 and `[{"result": "Property <column> added to table <Table>."}]`. Log `"Schema migrated in place: added <Table>.<column> (<kuzu_type>)"` and continue.
-   - **Exit 4 with any other error message, or any other non-zero exit:** this is not a drift situation — something else is wrong. Print the stderr JSON verbatim, prefixed with `"Schema drift probe failed for <Table>.<column>: "`, and exit non-zero. Do NOT attempt an ALTER on an ambiguous failure; the full-rebuild escape hatch (`rm -rf .cc-master/graph.kuzu/ && cc-master:index --full`) is always available to the user as a last resort and is safer than blindly mutating the schema.
-
-**Expected columns** (tables + columns introduced in versions later than v0.21.0's minimum; probed and ALTER-patched if absent):
-
-| Table | Column | Kuzu type | Introduced in |
-|-------|--------|-----------|---------------|
-| Task | competitor_insight_ids | STRING[] | v0.21.0 (kanban integration wave) |
-| Task | phase | STRING | v0.21.0 (kanban integration wave) |
-| Subtask | competitor_insight_ids | STRING[] | v0.21.0 (kanban integration wave) |
-| Subtask | phase | STRING | v0.21.0 (kanban integration wave) |
-
-When this table grows in future waves (new columns added to other node types), append new rows here; the probe loop is column-list-driven so the migration code itself does not need to change.
-
-**Back-fill note.** `ALTER TABLE … ADD <col>` in Kuzu 0.11.2 initializes the new column on every existing row to the column's empty/null equivalent (empty list for `STRING[]`, empty string for non-nullable `STRING` when one is set as the column default, NULL otherwise). Step 5 overwrites these values on the next full-replace pass — because the per-file full-replace invariant DELETEs and re-INSERTs every Task / Subtask row whenever `kanban.json` is re-indexed, no dedicated back-fill query is needed. The first re-index pass after the ALTER writes the correct `competitor_insight_ids` and `phase` values end-to-end.
-
-**Rebuild fallback.** If a future Kuzu upgrade drops ALTER support, or if a column needs to change type (not just be added), the skill's fallback is the well-documented full-rebuild path: the user runs `rm -rf .cc-master/graph.kuzu/ && /cc-master:index --full`, which rebuilds the graph from the JSON source of truth. The graph rebuilt from JSON is always valid — the graph is a derived index, not a primary store — so the rebuild never loses data. This substep's probe-and-ALTER logic is strictly an optimization over that always-available escape hatch; a regression in Kuzu's ALTER support is therefore a UX issue, not a correctness issue.
-
-**Step 3.3 — Smoke-check the connection.**
-
-After all DDL statements execute cleanly, run a final smoke query to prove the database is readable end-to-end:
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:_Marker) RETURN count(m) AS c"
-```
-
-The `_Marker` node table was created by `kuzu_client.py init` itself (see `cmd_init` in the CLI) specifically so this smoke query always has a table to target, regardless of whether any v1 data has been loaded yet.
-
-Expect exit code 0 and a JSON array on stdout with exactly one row whose `c` column is a number (typically `0` on a fresh graph). Example:
-
-```
-[{"c": 0}]
-```
-
-If the smoke query fails:
-
-- **Non-zero exit:** print the stderr JSON verbatim prefixed with `"Kuzu smoke query failed — graph is not usable: "`, then exit non-zero. Do not proceed to Step 4.
-- **Stdout is not a JSON array, or the array is empty, or the first row lacks a `c` key, or `c` is not a number:** print `"Kuzu smoke query returned unexpected payload: <raw stdout>"` and exit non-zero. This indicates a Kuzu-side regression worth filing upstream.
-
-Only if the smoke query returns `[{"c": <number>}]` does this step succeed. On success, proceed to Step 4 with the database confirmed initialized, all v1 tables present, and the connection verified.
-
-### Step 4: Absence Handling
-
-This step runs before any file processing. It ensures the graph doesn't accumulate stale data for files that have been deleted from disk. Without it, deleting a spec (or any other tracked artifact) would leave orphan nodes, orphan edges, and an orphan `_source` bookkeeping row behind forever — every future pass would read those rows, believe the file is still tracked, and skip the cleanup. The contract is defined in `docs/plans/2026-04-graph-engine-v1.md` under "Absence handling" (lines 360-362); that section is authoritative if it and this step ever diverge.
-
-**When this step runs.** Run Step 4 in ALL index passes EXCEPT `--touch`. `--full` (from Step 1's argument parsing) is orthogonal to absence — `--full` only bypasses the hash-compare skip in Step 5.2b and does NOT suppress the absent-file sweep, so absence handling runs under `--full` too. Subtask #51 later adds the `--touch` skip-condition; for now this step runs unconditionally on every pass the indexer is invoked with. If `_source` is empty (e.g., the first-ever index pass on this project, immediately after Step 3's bootstrap DDL), the MATCH below returns zero rows, the loop has no iterations, `deleted_count` stays at its Step 5.6-initialized value of `0`, and Step 4 completes in a single query.
-
-**Step 4.1 — Enumerate every tracked file path.**
-
-Query `_source` for every file the indexer has ever written a bookkeeping row for:
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
-  "MATCH (s:_source) RETURN s.file_path AS fp" \
-  --params-json '{}'
-```
-
-Capture the returned array of `{"fp": "<path>"}` records. If the query fails (non-zero exit — Kuzu error, graph corruption, etc.), log `"Absence enumeration failed: <error>. Skipping Step 4; deleted_count remains 0."`, append `"absence enumeration failed"` to the pass-level `warnings` list (defined in Step 5.7), and proceed to Step 5. Do NOT abort the pass — Step 5 can still do useful work on files that exist, and the next pass will re-attempt enumeration.
-
-**Step 4.2 — For each returned `fp`, check existence and decide.**
-
-Iterate the captured records one at a time. For each `fp`:
-
-1. **Existence check.** Use Bash `[ -e "<fp>" ]`. Interpret exit code:
-   - Exit `0` → the path exists on disk. **Continue to the next `fp` — take no action here.** The file will be hashed and (if dirty) re-indexed in Step 5.
-   - Exit `1` → the path does not exist. Proceed to Step 4.3 (delete).
-   - Any other exit code (e.g., `2` from a permission-denied stat on a parent directory, or a shell error) → treat as **unknown state** and skip. Log `"Absent-check failed for <fp>: <error>. Skipping absence handling for this file; it will be re-evaluated next pass."`, append `"absence check failed for <fp>"` to `warnings`, and continue to the next `fp`. Do NOT run the DELETE statements on an unknown-state path — deleting under a stat failure would silently wipe live graph data whenever the parent directory's permissions flicker.
-
-2. **Pseudo-path override for `ast-grep-walk:<module-name>`.** If `fp` begins with the literal prefix `ast-grep-walk:` (a v2-wave source whose `_source` rows are not backed by a single file on disk; see the Content Hashing section's third rule), the filesystem check is meaningless. Instead, extract the module name (everything after the colon) and query whether its Module node still exists:
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
-     "MATCH (m:Module {name: $name}) RETURN count(m) AS c" \
-     --params-json '{"name": "<module-name>"}'
-   ```
-
-   - If `c > 0` → the Module still exists; continue to the next `fp`.
-   - If `c == 0` → the Module is gone; treat `fp` as absent and proceed to Step 4.3.
-   - If the query errors → treat as unknown state (same contract as the Bash exit-code fallthrough above): log, add a warning, skip.
-
-   Wave 6 wires the ast-grep walker into Step 5.4; from that wave onward `_source` rows with the `ast-grep-walk:<module-name>` pseudo-path are written on every code-graph pass, and this branch is hit whenever the named Module is dropped from `discovery.json` between index runs.
-
-**Step 4.3 — Delete the absent file's nodes, then its `_source` row.**
-
-Run two Cypher statements in sequence via `kuzu_client.py`. These are two separate Kuzu statements, per the Option B transaction model from subtask #40 — they are NOT wrapped in a single atomic transaction.
-
-1. **First statement — remove all nodes owned by `fp` (and their attached edges via `DETACH DELETE`):**
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
-     "MATCH (n) WHERE n.source_file = $fp DETACH DELETE n" \
-     --params-json '{"fp": "<fp>"}'
-   ```
-
-   Capture the stderr and exit code. On non-zero exit, log `"Absence delete (nodes) failed for <fp>: <error>. Leaving _source row intact; next pass will retry."`, append `"absence node-delete failed for <fp>"` to `warnings`, and continue to the next `fp` without running the second statement. Retrying on the next pass is safe because the `_source` row still marks the file as tracked.
-
-2. **Second statement — remove the `_source` bookkeeping row:**
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query \
-     "MATCH (s:_source {file_path: $fp}) DELETE s" \
-     --params-json '{"fp": "<fp>"}'
-   ```
-
-   On non-zero exit, log `"Absence delete (_source) failed for <fp>: <error>. Graph nodes removed but _source row remains; next pass will retry the _source delete."`, append `"absence _source-delete failed for <fp>"` to `warnings`, and continue. The re-query of `_source` at the start of the next pass will pick this row up again; Step 4.2's existence check will confirm the file is still absent; Step 4.3's first statement will find zero nodes (they're already gone) and return success (see the edge case below); Step 4.3's second statement will run again and — filesystem permitting — succeed. The system is self-healing across passes.
-
-3. **Increment `deleted_count`** (the Step 5.7 pass-level counter, initialized to `0`) by one for each `fp` that completed both statements successfully.
-
-4. **Log one line per successfully deleted file:**
-
-   ```
-   Absent: <fp> — removed <N> nodes
-   ```
-
-   where `<N>` is the node count returned by the DETACH DELETE statement's result. If the Kuzu client binding in use does not surface a deletion count for `DETACH DELETE` (implementations vary), omit the count and log `"Absent: <fp> — nodes and _source row removed"` instead. Either form is acceptable; do NOT fabricate a count.
-
-**Edge case — zero nodes found, `_source` row still present.** If the first DELETE statement succeeds but reports zero nodes removed (the graph was partially corrupted in a prior pass — nodes already gone, `_source` row still lingering), still run the second DELETE to clean up the orphan `_source` row, and log `"Absent: <fp> — no nodes found, removed stale _source row only"` instead of the normal message. Do NOT increment `deleted_count` in this case — no new deletion happened, only cleanup of a known-stale bookkeeping row; increment a separate internal `stale_source_rows_cleaned` tally if useful for debugging, but it is not a summary-surface counter.
-
-**Atomicity note.** Each absence-handling pair (the DETACH DELETE plus the `_source` DELETE) is two separate Kuzu statements, not a single transaction — the Option B transaction model from subtask #40 limits atomicity to single-statement scope for v1. If the first succeeds and the second fails, the graph ends the pass in a state where the file's nodes are gone but `_source` still claims they exist. That state is recoverable: on the next pass, Step 4.1 re-enumerates `_source` and picks the lingering row up again; Step 4.2 confirms the file is still missing from disk; Step 4.3's first statement runs against an already-empty node set (zero nodes deleted → the "edge case" branch above triggers), and the second statement finally removes the stale row. The system converges within one additional pass per stuck row.
-
-On completion, Step 4 has left the graph free of orphan nodes, orphan edges, and orphan `_source` rows for every deleted file it observed. `deleted_count` reflects the number of files swept in this pass. Proceed to Step 5.
-
-### Step 5: Index Files (per-file full-replace)
-
-This step is where the graph is actually written. Every source file is re-indexed as a full unit: DELETE all nodes owned by the file, then INSERT the parsed records from scratch. This is the "per-file full-replace upsert, never merge" invariant declared in `docs/plans/2026-04-graph-engine-v1.md` under "Upsert protocol" (starting at line 364) — read that section before editing this step. The design doc is authoritative if it and this skill ever diverge.
-
-The `File UPDATE-in-place exception` described in `docs/plans/2026-04-graph-engine-v1.md` line 204 ("Exception to the per-file full-replace invariant") applies only to File nodes whose `source_file = 'ast-grep-walk'`. Those nodes are populated by Step 5.4 (code-graph pass), which is the sole site that exercises the exception. The JSON-sourced files handled by Step 5.3 below (kanban, roadmap, discovery, specs) always take the full-replace path — no UPDATE-in-place for any source other than `ast-grep-walk` File nodes.
-
-**Step 5.0 — Read indexer version.**
-
-Before any file processing, read `.claude-plugin/plugin.json` and extract the `version` field (a string, e.g., `"0.21.0-dev"`). This value is stamped into every `_source` row written in this pass (in subtask #44). It is also used for the hash-compare skip in 5.2b below. Cache this value in memory for the whole pass — do NOT re-read `plugin.json` once per file.
-
-Concretely, via Bash:
-
-```
-python3 -c "import json,sys; print(json.load(open('.claude-plugin/plugin.json'))['version'])"
-```
-
-Call the captured string `current_indexer_version`. If the file is absent or the `version` field is missing, reject with: `"Indexer cannot determine current version — .claude-plugin/plugin.json is missing or lacks a 'version' field."` and exit non-zero. This is a hard failure because the hash-compare skip and the `_source` stamping both depend on a known version string; proceeding with an unknown version would silently corrupt the invalidation logic on the next pass.
-
-**Step 5.1 — Determine the file set.**
-
-For the default path (no `--module`, no `--touch`), the file set is the canonical list of cc-master JSON artifacts plus every non-archived spec on disk. Specifically:
-
-1. `.cc-master/kanban.json` — if it exists on disk.
-2. `.cc-master/roadmap.json` — if it exists on disk.
-3. `.cc-master/discovery.json` — if it exists on disk.
-4. Every file directly under `.cc-master/specs/` whose name matches the regex `^[0-9]+\.md$`, excluding:
-   - any path under `.cc-master/specs/archive*/` subdirectories,
-   - any file matching `*-review.json`.
-
-Build this set as an ordered list. JSON artifacts come first (kanban → roadmap → discovery), then specs in ascending numeric order of their task id. This ordering matters because the kanban parser's IMPLEMENTS edges reference Feature nodes (produced by roadmap), and the specs parser's TOUCHES edges reference Module nodes (produced by discovery). Upserting kanban first and specs last means the endpoint nodes exist by the time dependent edges are written. Edges whose endpoint still does not exist (because the referenced file was absent or excluded) are dropped silently per the no-dangling-edges rule from the Parsers section.
-
-**Flag interactions with the file set:**
-
-- `--full` does NOT change the file set. It changes the *decision* each file takes in Step 5.2b (always full-replace, never skip). Every file in the canonical list still participates. See Step 5.2b's `--full` override.
-- `--touch <file>` does NOT reach Step 5.1 — the `## --touch Single-File Refresh` section intercepts the skill's flow after Step 3 and skips Steps 4 and 5 entirely. If `touch_target` is set, this step is not executed.
-- `--module <name>` narrows the file set as follows:
-  1. Always include `.cc-master/discovery.json` — without it, the Module node for `<name>` cannot be refreshed, and the narrowing below is meaningless.
-  2. DO include `.cc-master/kanban.json` only if at least one Task or Subtask in the kanban has `metadata.module == <name>` (a grep against the parsed kanban is sufficient). If no task references the module, skip kanban for this pass. Rationale: Tasks and Subtasks do not have a `module` property in the v1 node schema (see the design doc), but in projects that stamp `metadata.module` on tasks, the Task-to-Module relationship is preserved implicitly through the shared module name. When `--module` narrows the pass, only re-upserting kanban makes sense if some tasks reference the module.
-  3. DO include `.cc-master/roadmap.json` only if at least one feature has `module == <name>` in its record. Same rationale as kanban.
-  4. INCLUDE every spec file whose parsed `touches_modules` array contains `<name>`. This requires a lightweight pre-pass — parse each candidate spec's "Files to Modify" / "Files to Create" subsections and do the longest-prefix match against `Module.path` for `<name>` only. Specs that don't touch `<name>` are excluded from this pass.
-  5. The resulting ordered list is: `[discovery.json]` + (optional `kanban.json`) + (optional `roadmap.json`) + matching specs in ascending task-id order.
-  
-  After narrowing, Step 5 proceeds normally with the reduced set. Files NOT in the narrowed set are untouched: their `_source` rows, graph nodes, and graph edges remain from the previous pass. This is exactly what `--module` is for — targeted incremental indexing when only one module changed.
-
-- If `--full` AND `--module` are BOTH set (they are not mutually exclusive), the narrowing above applies AND every file in the narrowed set takes the full-replace path in 5.2b (no hash-skip). Counter semantics: `unchanged_count` stays 0, `changed_count` counts every file in the narrowed set.
-
-**Step 5.2 — For each file, call the matching parser.**
-
-Iterate the file set in the order from 5.1. For each path, invoke the matching parser from the `## Parsers` section:
-
-- `.cc-master/kanban.json` → the `Parser: kanban.json` routine.
-- `.cc-master/roadmap.json` → the `Parser: roadmap.json` routine.
-- `.cc-master/discovery.json` → the `Parser: discovery.json` routine.
-- any `.cc-master/specs/<id>.md` → the `Parser: specs/*.md` routine (the specs parser is directory-scoped — invoke it once for the whole `.cc-master/specs/` directory rather than once per file; it yields one Spec node per accepted file).
-
-Capture the returned `{nodes, edges}` record bundle in memory. If a source file does not exist on disk (e.g., `roadmap.json` not present on a fresh project), the parser returns `{"nodes": [], "edges": []}` per its own absence contract — skip the upsert for that file entirely. Do NOT issue a DELETE for a file that was never indexed, do NOT treat the absent file as an error, and do NOT create an empty `_source` row for it. Simply move on to the next file.
-
-If a parser raises a hard error (malformed JSON, schema violation), do NOT issue any DELETE or INSERT for that file. Record it as FAILED in the per-file tracking (see Step 5.7) and continue to the next file. Parse failures must surface before any Cypher runs — per the `## Parsers` preamble, "a parser error must surface before any DELETE runs against the graph."
-
-**Step 5.2b — Hash-compare skip.**
-
-Before DELETEing and re-INSERTing this file's rows in 5.3, check whether the file's on-disk content is unchanged since the previous pass. If it is, and the stored indexer version matches `current_indexer_version` from Step 5.0, the previous graph state is still correct and we skip the full-replace entirely.
-
-This is the key optimization that makes re-indexing fast enough to run often. Without it, every invocation re-inserts every node and edge of every file, even when nothing changed.
-
-**`--full` override (evaluated FIRST, before any other check in this substep):** If `--full` was set in argument parsing (Step 1), skip this hash-compare check entirely and fall through to 5.3 (full-replace). The file ALWAYS counts as `changed` when `--full` is set. This section's remaining checks (the `_source` read, the current-hash computation, the equality compare) are only evaluated when `--full` is unset. (The `--full` flag's entire purpose is to force re-index, so honoring the skip here would defeat it.)
-
-**Vocabulary — two different hashes:** The `_source.content_hash` column holds the **stored hash** — the hash of the file's contents as of the end of the previous successful indexing pass. The **current hash** is what we compute RIGHT NOW from the bytes currently on disk. These are two different values. The skip happens only when the two values are equal (and the indexer versions also match).
-
-Procedure for a single file `<file_path>`:
-
-1. **Read the `_source` row** (if any) via `kuzu_client.py`:
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (s:_source {file_path: $fp}) RETURN s.content_hash AS stored_hash, s.indexer_version AS stored_version" \
-     --params-json '{"fp": "<file_path>"}'
-   ```
-
-   - If exit code 0 and the returned array is empty → no `_source` row exists. Treat this as a **first index** for the file: proceed to 5.3 for a full-replace.
-   - If exit code 0 and the returned array has one row → capture `stored_hash` and `stored_version` for the compare below.
-   - If the query fails (any non-zero exit — graph is corrupted, Cypher error, etc.) → treat as no `_source` row, log a one-line warning `"_source read failed for <file_path>: <error> — forcing full-replace"`, and proceed to 5.3. Do NOT abort the pass. (See Step 5.7 for how this interacts with `warnings`.)
-
-2. **Compute the current hash.** Apply the appropriate rule from the `## Content Hashing` section based on the file's path:
-   - `.cc-master/kanban.json`, `.cc-master/roadmap.json`, `.cc-master/discovery.json` → the JSON artifacts rule.
-   - `.cc-master/specs/<id>.md` → the Markdown spec files rule.
-   - `ast-grep-walk:<module-name>` pseudo-paths → the Code-graph module walks rule. These rows are written by Step 5.4 and the hash-compare here short-circuits the module re-walk when the composite module hash matches.
-
-   Per the Content Hashing section's return-value contract, the result is either `{"hash": "<64-char-hex>"}` on success or `{"hash": null, "error": "..."}` on failure.
-
-3. **Handle the hash result:**
-
-   - If `hash` is `null` (computation errored): log a one-line warning `"hash unavailable for <file_path>: <error> — forcing full-replace"`, increment the `hash_errors` counter (defined in `## Content Hashing`), and proceed to 5.3. Do NOT skip — we cannot prove the content is unchanged, so we treat the file as changed.
-   - If `hash` is a valid hex string, call it `observed_hash` and continue to the compare.
-
-4. **Compare:**
-   - If `observed_hash == stored_hash` **AND** `current_indexer_version == stored_version` → **skip this file**. Increment `unchanged_count`. Do NOT issue DELETE or any CREATE for this file. Continue to the next file in the set.
-   - Else (either the content hash differs, or the stored indexer version differs, or both) → proceed to 5.3 for a full-replace.
-
-5. **Counter accounting on full-replace:** When 5.3 completes successfully for a file that reached it via this substep (i.e., the file was NOT skipped above), increment `changed_count` at the end of 5.3 on success. See Step 5.7 for the counter's definition and summary surfacing.
-
-**Step 5.3 — Execute full-replace for each file.**
-
-For each file that produced a record bundle in 5.2, perform the following three-phase full-replace via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py`. All three phases use the same `<file_path>` — the literal string the parser stamped into every node's `source_file` property.
-
-**Phase A: DELETE all prior nodes owned by this file.**
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-  "MATCH (n) WHERE n.source_file = $sf DETACH DELETE n" \
-  --params-json '{"sf": "<file_path>"}'
-```
-
-`DETACH DELETE` removes the node AND every edge attached to it in one step, so no orphan edges are left in the graph — this is why the design doc's cascading-edges footnote (line 385) is a one-liner here. If the file is new (no prior rows), the MATCH returns zero rows and the DELETE is a no-op; that is fine and does not need to be special-cased.
-
-**Phase B: INSERT nodes.**
-
-For every node record in the bundle, run one parameterized CREATE. The exact label and column set come from the parser's `type` and `properties` fields, which the Parsers section pins to the DDL column names in Step 3. Generic template:
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-  "CREATE (n:<NodeType> {id: $id, subject: $subject, status: $status, ...})" \
-  --params-json '<json of properties>'
-```
-
-Concrete examples, one per v1 node type:
-
-- Task: `CREATE (n:Task {id: $id, subject: $subject, status: $status, priority: $priority, source: $source, owner: $owner, created_at: $created_at, updated_at: $updated_at, source_file: $source_file, competitor_insight_ids: $competitor_insight_ids, phase: $phase})` — `competitor_insight_ids` is a `STRING[]`; pass as a native JSON array (e.g. `"competitor_insight_ids": ["ins-12", "ins-47"]`, or `[]` when the task was not sourced from a competitor insight). `phase` is a plain STRING defaulting to `""` when the task has no phase stamp.
-- Subtask: `CREATE (n:Subtask {id: $id, parent_id: $parent_id, subject: $subject, status: $status, blocked_by: $blocked_by, spec_file: $spec_file, wave: $wave, created_at: $created_at, updated_at: $updated_at, source_file: $source_file, competitor_insight_ids: $competitor_insight_ids, phase: $phase})` — `blocked_by` and `competitor_insight_ids` are both list-typed (`INT64[]` and `STRING[]`); pass each as a native JSON array in `--params-json` (e.g. `"blocked_by": [3, 7]`, `"competitor_insight_ids": []`). Kuzu's Python binding maps JSON arrays to list-typed columns. `phase` is a plain STRING defaulting to `""`.
-- Spec: `CREATE (n:Spec {task_id: $task_id, file_path: $file_path, has_production_readiness: $has_production_readiness, has_verified_contracts: $has_verified_contracts, touches_modules: $touches_modules, updated_at: $updated_at, source_file: $source_file})` — `touches_modules` is `STRING[]`, pass as JSON array.
-- Feature: `CREATE (n:Feature {id: $id, title: $title, priority: $priority, status: $status, phase: $phase, complexity: $complexity, impact: $impact, delivered_at: $delivered_at, source_file: $source_file})`
-- Module: `CREATE (n:Module {name: $name, path: $path, language: $language, file_count: $file_count, source_file: $source_file})`
-- File: `CREATE (n:File {path: $path, module: $module, language: $language, content_hash: $content_hash, size: $size, is_test: $is_test, last_indexed: $last_indexed, source_file: $source_file})`
-
-Loop simplicity over bulk performance is the v1 stance — one `kuzu_client.py query` invocation per node record. Later waves may batch via UNWIND; this subtask deliberately uses the one-shot form because it makes error-message attribution (Step 5.7) trivial: the failing statement IS the current record.
-
-**Phase C: INSERT edges.**
-
-For every edge record in the bundle, MATCH the two endpoint nodes by primary key and CREATE the rel. Template:
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-  "MATCH (a:<FromType> {<pk>: $fromId}), (b:<ToType> {<pk>: $toId}) CREATE (a)-[:<REL>]->(b)" \
-  --params-json '{"fromId": <from_key>, "toId": <to_key>}'
-```
-
-Concrete examples, one per v1 edge type:
-
-- HAS_SUBTASK: `MATCH (a:Task {id: $fromId}), (b:Subtask {id: $toId}) CREATE (a)-[:HAS_SUBTASK]->(b)`
-- HAS_SPEC: `MATCH (a:Task {id: $fromId}), (b:Spec {task_id: $toId}) CREATE (a)-[:HAS_SPEC]->(b)`
-- BLOCKED_BY (Task→Task, Task→Subtask, Subtask→Task, Subtask→Subtask — the rel table has four FROM/TO pairs; the caller picks the right pair from the edge record's `from.type` and `to.type`): `MATCH (a:<FromType> {id: $fromId}), (b:<ToType> {id: $toId}) CREATE (a)-[:BLOCKED_BY]->(b)`
-- IMPLEMENTS: `MATCH (a:Task {id: $fromId}), (b:Feature {id: $toId}) CREATE (a)-[:IMPLEMENTS]->(b)`
-- TOUCHES (has an `intent` property): `MATCH (a:Spec {task_id: $fromId}), (b:Module {name: $toId}) CREATE (a)-[:TOUCHES {intent: $intent}]->(b)` — params JSON includes `"intent": "modify"` or `"intent": "create"` from the edge record's properties.
-
-CONTAINS edges are NOT emitted here — they are resolved in Step 5.5 after all per-file upserts (Step 5.3) and all per-module code-graph upserts (Step 5.4) complete.
-
-**Referential integrity — dangling references drop silently.** A MATCH-then-CREATE with a non-existent endpoint returns zero rows from MATCH, so the CREATE runs on an empty set and creates zero edges. Kuzu exits 0. That is the design — "dangling references → no edge" from the Parsers preamble. Do NOT raise an error when the MATCH is empty. Do NOT log a warning for each drop (it would spam the summary on a fresh or incomplete graph). The final summary (Step 6) will surface edge counts so the user can see at a glance whether the drop rate looks wrong.
-
-**Step 5.3c — Upsert `_source` row after successful full-replace.**
-
-After Phase A, B, and C have all completed without a Cypher error for a given file, the indexer MUST upsert the `_source` bookkeeping row for that file. This is the write side of the hash-compare skip in Step 5.2b — without it, the stored hash never updates and every subsequent pass re-indexes the file even though its content has not changed. This substep is the closing half of the hash-tracking loop declared in the `_source` invalidation algorithm (see `docs/plans/2026-04-graph-engine-v1.md` lines 331-358).
-
-**Preconditions — when this substep runs:**
-
-- Runs ONLY when the file was **full-replaced** in this pass — i.e., it went through Phases A + B + C of 5.3 and every Cypher statement exited 0.
-- Does NOT run when the file was skipped via the 5.2b hash-match short-circuit — the existing `_source` row is already correct; touching it would needlessly rewrite `last_indexed_at` and churn the graph without informational value. Skip paths leave `_source` alone.
-- Does NOT run when 5.3 produced a mid-file Cypher error — such a file is already added to `files_failed` by Step 5.7's error-handling contract, and the graph holds a partial upsert for that file. Writing a `_source` row on top of a partial upsert would falsely advertise the file as cleanly indexed and suppress the next pass's repair cycle. Leave `_source` unchanged so the next pass forces a full-replace.
-
-**Note on `--full` semantics (write-side effect):** With `--full`, this upsert effectively refreshes every `_source` row's `last_indexed_at` timestamp and `indexer_version` column, even when the content hash is unchanged. The `content_hash` written is still the current hash from disk (computed per the `h` parameter contract below), so an unchanged file under `--full` writes back an identical hash — but the timestamp and version stamps are freshly re-sampled on every `--full` pass. That freshness is the observable signal that `--full` actually ran end-to-end on each file.
-
-**Parameters to bind (all passed via `--params-json`):**
-
-| Param | Column | Type | Source |
-|-------|--------|------|--------|
-| `fp` | `file_path` | STRING | The same `<file_path>` used in Phases A/B/C — the literal string the parser stamped into every node's `source_file` property. |
-| `h` | `content_hash` | STRING | The 64-char SHA-256 hex digest. If this file reached 5.3 via 5.2b's change-detected branch, reuse the `observed_hash` already computed in 5.2b — do NOT re-hash. If this file reached 5.3 without a 5.2b hash compute (e.g., `--full` bypassed it, or the `_source` read query failed), compute the current hash now using the appropriate rule from the `## Content Hashing` section. If hashing errors (returns `{"hash": null, ...}`), skip the `_source` upsert for this file and append a warning `"_source hash unavailable for <file_path>: <error> — _source not updated"`; do NOT mark the file as FAILED (the full-replace itself succeeded). |
-| `ts` | `last_indexed_at` | TIMESTAMP | ISO-8601 UTC timestamp at the moment of this upsert, millisecond precision with a `Z` suffix, e.g., `"2026-04-18T14:30:00.000Z"`. Generate a single timestamp per 5.3c invocation (do NOT re-sample the clock inside the CAST fallback). |
-| `nc` | `node_count` | INT64 | Integer count of node records that were successfully INSERTed for this file in Phase B. Count the length of the parser-returned `nodes` list (minus any nodes whose individual CREATE exited non-zero — but in the success path, there are none, since any Cypher error aborts 5.3 before 5.3c runs). |
-| `ec` | `edge_count` | INT64 | Integer count of edge records that were successfully INSERTed for this file in Phase C. Count the length of the parser-returned `edges` list, minus any edges silently dropped because of missing endpoints (a dropped edge is a MATCH that returned zero rows; the `kuzu_client.py query` exits 0 and creates zero edges, so it does not count toward `edge_count`). In practice this means the executor tracks "edges whose MATCH returned one or more endpoint rows" — equivalent to the number of non-zero CREATEs observed during Phase C. When this tracking is not trivial to surface per-statement, fall back to the parser-returned `edges` list length; the small over-count is acceptable for v1 diagnostics and is explicitly noted as such here so it is not mistaken for a bug. CONTAINS edges from 5.4 are pass-level and are NOT counted into any file's `_source.edge_count`. |
-| `v` | `indexer_version` | STRING | The `current_indexer_version` captured in Step 5.0 from `.claude-plugin/plugin.json`. |
-
-**Note on the Parsers section:** The `## Parsers` contract defines the return shape as `{nodes, edges}` — the executor computes `nc` as `len(bundle["nodes"])` and `ec` as `len(bundle["edges"])` inline at 5.3c time. The Parsers section does not need to emit explicit count fields; treating the list lengths as the counts is the v1 convention. Do NOT retrofit the parsers to return `node_count` / `edge_count` fields — that would expand the Parsers contract for no benefit.
-
-**Cypher — primary form (MERGE):**
-
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-  "MERGE (s:_source {file_path: $fp})
-     ON CREATE SET s.content_hash = $h, s.last_indexed_at = CAST($ts AS TIMESTAMP), s.node_count = $nc, s.edge_count = $ec, s.indexer_version = $v
-     ON MATCH  SET s.content_hash = $h, s.last_indexed_at = CAST($ts AS TIMESTAMP), s.node_count = $nc, s.edge_count = $ec, s.indexer_version = $v" \
-  --params-json '{"fp": "<file_path>", "h": "<64-hex>", "ts": "2026-04-18T14:30:00.000Z", "nc": <int>, "ec": <int>, "v": "<semver>"}'
-```
-
-The ON CREATE and ON MATCH clauses apply the same SET list — this is intentional. Some Kuzu versions require both clauses even when their bodies are identical; specifying them removes ambiguity about which path ran and makes the statement portable across Kuzu releases.
-
-**Timestamp binding — try CAST first.** Kuzu's `TIMESTAMP` binding does NOT always accept a bare ISO-8601 string through `--params-json` — the safe form is to pass `$ts` as a STRING and wrap each reference inside the Cypher with `CAST($ts AS TIMESTAMP)` as shown above. Use the CAST form on the first attempt. If Kuzu rejects the CAST form on the installed version, the executor MAY fall back to passing the timestamp in whatever TIMESTAMP literal format that Kuzu version accepts directly (typically `YYYY-MM-DD HH:MM:SS.sss` without the `T` separator and without the `Z` suffix) — but the first attempt MUST be the CAST form because it is the most portable.
-
-**Cypher — fallback form (MATCH-DELETE + CREATE).** If the installed Kuzu version rejects the MERGE+ON CREATE/ON MATCH form outright (Cypher exit code 4 with a syntax error specifically on the MERGE clause), fall back to a two-step MATCH-first delete + CREATE:
-
-```
-# Step 1: delete any existing row (no-op if none)
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-  "MATCH (s:_source {file_path: $fp}) DELETE s" \
-  --params-json '{"fp": "<file_path>"}'
-
-# Step 2: insert the fresh row
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-  "CREATE (s:_source {file_path: $fp, content_hash: $h, last_indexed_at: CAST($ts AS TIMESTAMP), node_count: $nc, edge_count: $ec, indexer_version: $v})" \
-  --params-json '{"fp": "<file_path>", "h": "<64-hex>", "ts": "2026-04-18T14:30:00.000Z", "nc": <int>, "ec": <int>, "v": "<semver>"}'
-```
-
-The MATCH-first delete is required — a blind `CREATE (s:_source {file_path: $fp, ...})` on top of an existing row would leave two `_source` rows for the same path, which breaks the 5.2b hash compare. Never emit the CREATE without the preceding MATCH DELETE in the fallback path.
-
-**Transaction semantics.** 5.3c runs inside the same Option B envelope as 5.3 itself (see Step 5.6): each statement is its own Kuzu auto-commit transaction. The MERGE or the two-step fallback is NOT atomic with the Phase A/B/C statements — if the process is interrupted between a successful Phase C and the 5.3c MERGE, the graph holds fully-upserted nodes and edges for this file but no `_source` row yet. The next `cc-master:index` pass will see "no `_source` row → first index" in 5.2b, force another full-replace via Phase A (which cleanly DELETEs the prior pass's nodes by `source_file`), and re-run 5.3c. The divergence is self-healing within one pass — no lasting damage, just one wasted re-index.
-
-**Failure handling.** If the `_source` MERGE (or either step of the fallback) exits non-zero (Cypher error):
-
-1. Log the failing `<file_path>` on its own line, prefixed `"_source upsert failed: "`.
-2. Print the failing Cypher truncated to 200 characters (trailing `…` if truncated) and the stderr JSON verbatim — same format as the 5.3 error contract in Step 5.7.
-3. Mark the file as FAILED — append its `<file_path>` to `files_failed`. This overrides any earlier 5.3-level success signal for the file, because without a `_source` row the graph is in an inconsistent state: it advertises nodes for this file but the hash-tracking record is missing. The next pass will detect "no `_source` row → first index" in 5.2b and force a full-replace, so the inconsistency is bounded to the next invocation.
-4. Increment `files_failed` accordingly; do NOT increment `changed_count` (the file did not fully succeed).
-5. Continue to the next file in the set — do NOT abort the pass.
-
-A `_source` upsert failure is strictly a data-layer failure, not a structural one: the graph now has nodes but no `_source` row, next pass will force full-replace, so no lasting damage.
+Step 5.4 runs AFTER the bulk indexer (Steps 4-6 above) — the indexer provides the up-to-date Module node set that 5.4 walks.
 
 **Step 5.4 — Code-graph pass (per-module).**
 
@@ -1070,200 +700,65 @@ Accepted v1 tradeoff to ship the indexer on a single binary with zero per-langua
 
 Any one of those conditions opens the v0.22 SCIP indexer swap-in task. The graph schema (Module, File, Symbol, REFERENCES) is stable across the swap; only the indexer binary changes. Until that trigger fires, `/cc-master:impact` and other graph readers account for this limitation by falling back to conservative approximations (e.g., module-level impact, string-grep on dynamic-dispatch suspects) rather than claiming completeness.
 
-**Step 5.5 — Resolve CONTAINS edges (finalization pass).**
-
-After every file in the set has been processed through 5.3 and every Module has been processed through 5.4, CONTAINS edges between Module and File nodes are resolved in a single finalization pass. This is separated out because CONTAINS depends on both Module nodes (from `discovery.json`) and File nodes (from `discovery.json` AND from Step 5.4's `ast-grep-walk` output) being fully present — a per-file pass cannot produce them correctly because the longest-prefix-match requires knowing the complete set of Module paths.
-
-Procedure:
-
-1. Load every Module's `name` and `path` from the graph:
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (m:Module) RETURN m.name AS name, m.path AS path"
-   ```
-
-2. Sort the returned Modules by descending length of `path` — the longest (deepest) paths come first. This guarantees that a File whose path matches multiple Module prefixes is claimed by the deepest-matching Module.
-
-3. For each Module in that sorted order:
-
-   a. First, DELETE existing CONTAINS edges rooted at this module. This prevents duplication when the skill re-runs on an already-populated graph:
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (m:Module {name: $name})-[r:CONTAINS]->(:File) DELETE r" \
-     --params-json '{"name": "<module name>"}'
-   ```
-
-   b. Then CREATE CONTAINS edges to every File whose `path` starts with this Module's `path` AND has not already been assigned to a deeper module in this pass. Track assigned File paths in a local set that accumulates across iterations. Query:
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (m:Module {name: $name}), (f:File) WHERE f.path STARTS WITH $path AND NOT f.path IN $already_assigned CREATE (m)-[:CONTAINS]->(f) RETURN f.path AS claimed" \
-     --params-json '{"name": "<module name>", "path": "<module path>", "already_assigned": [<paths already claimed>]}'
-   ```
-
-   c. Read the `claimed` column from the returned rows and add every path to the local `already_assigned` set before moving on to the next Module.
-
-4. If no Module nodes exist (e.g., `discovery.json` was absent), the finalization pass is a no-op and produces zero CONTAINS edges. Do not treat this as an error.
-
-The CONTAINS finalization pass is NOT counted against a specific source file in the per-file success tracking — it is a graph-wide finalization. Count its successful CREATEs toward the pass-level `edges_written` counter (Step 5.7) but do NOT mark any source file as FAILED if CONTAINS resolution errors. A CONTAINS error is surfaced as a separate pass-level warning in the Step 6 summary.
-
-**Step 5.6 — Transaction semantics (Option B).**
-
-`${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` opens a fresh `kuzu.Database` and `kuzu.Connection` on every `query` invocation and closes them when the Python process exits. Its `cmd_query` function passes a single Cypher string to `conn.execute(...)` and does not wrap the call in any `BEGIN TRANSACTION` / `COMMIT` block. This means **Option A (multi-statement transaction in one CLI call) is NOT available through the current wrapper** — the wrapper's contract is one statement per invocation. A true cross-statement transaction would require either (a) extending the wrapper to accept a multi-statement script and manage BEGIN/COMMIT itself, or (b) holding a persistent connection across many invocations, neither of which is in scope for this subtask.
-
-This skill therefore uses **Option B**: each individual CREATE or DELETE statement executes as its own atomic Kuzu transaction (Kuzu auto-commits single statements), but the overall per-file upsert sequence (DELETE, N×CREATE nodes, M×CREATE edges) is NOT enclosed in a single transaction. If the process is interrupted mid-file — say, a Cypher error on the 5th node CREATE after the DELETE and first 4 CREATEs already landed — the graph is left with a partial upsert for that file. On the next `cc-master:index` run, the partial state is fully replaced (DELETE by source_file catches every dangling row from the prior attempt), so the damage is self-healing and bounded to one pass.
-
-**Explicit consequences for operators:**
-
-- Each file's upsert is atomic ONLY at the per-statement level, not at the per-file level.
-- A partial failure mid-file is possible; it is detected and repaired on the next `cc-master:index` run (the next DELETE re-cleans the file's source rows).
-- Cross-file atomicity is not attempted — a file that upserts cleanly before a later file fails remains in the graph. This matches the design doc's "batching across multiple files" stance (line 412): "It processes one file per transaction — NOT all files in a single transaction. Rationale: a single bad parse should not invalidate an otherwise successful batch."
-- The failure-mode guarantee in the design doc (line 407) — "an in-flight transaction that does not reach COMMIT is rolled back on the next open" — still holds at the statement level; Kuzu will not leave a torn row from a crashed single CREATE. What it does NOT hold at is the multi-statement boundary in v1.
-- Upgrading to true per-file transactions is tracked as a v2 follow-up (it requires extending `kuzu_client.py` with a multi-statement mode).
-
-Document the Option B choice in the Step 6 summary output — specifically, include a one-line note `"transaction_mode": "per-statement (Option B)"` in the summary JSON so downstream skills can see what atomicity guarantee they are reading under.
-
-**Step 5.7 — Error handling and per-pass counters.**
-
-Every `kuzu_client.py query` invocation in phases 5.3 A/B/C, the 5.3c `_source` upsert, Step 5.4's per-module Phase 1–5 statements, and the Step 5.5 CONTAINS finalization pass must be wrapped in exit-code handling. Apply the contract table from Step 3 uniformly. Specifically for Cypher errors (exit code 4):
-
-1. Print the failing file path (for 5.3 or 5.3c), the pseudo-path `ast-grep-walk:<module_name>` (for 5.4 Phase 3/4/5 errors), or the literal string `"CONTAINS finalization"` (for 5.5) as the first line. For 5.3c, prefix with `"_source upsert failed: "` so the origin is unambiguous in the log.
-2. Print the failing Cypher statement, truncated to 200 characters with a trailing `…` if truncated.
-3. Print the stderr JSON verbatim — `kuzu_client.py` emits `{"error": "<msg>"}` on exit 4.
-4. Mark the current file or module's upsert as FAILED (do this by adding its path / pseudo-path to a `files_failed` list maintained across the pass). A 5.3c failure adds the file to `files_failed` even if 5.3 itself reported success — the combined "nodes present but no `_source` row" state is treated as a failed index for the file because the next pass will need to re-do it. A 5.4 Phase 3/4/5 Cypher error adds `"ast-grep-walk:<module_name>"` to `files_failed`. For a 5.5 error, do NOT mark any source file as FAILED; instead append `"CONTAINS finalization"` to the `warnings` list.
-5. Proceed to the next file or module (or to Step 6 if the error was in 5.5). Do NOT abort the whole pass on any single file failure.
-6. If `files_failed` is non-empty at the end of the pass, the skill's final exit code is non-zero (e.g., `2`) — but Step 6 still runs and renders the summary including the failed files list.
-
-A 5.3c hash computation failure (the parenthetical "hash unavailable" path in 5.3c's parameter table for `h`) is NOT a Cypher error and does NOT trigger the above sequence — it appends a `warnings` entry (`"_source hash unavailable for <file_path>: <error> — _source not updated"`) and leaves the file out of `files_failed`, since the full-replace itself succeeded and the only casualty is the bookkeeping row.
-
-For non-Cypher errors (exit codes 1, 2, 3): follow Step 3's contract table exactly. Exits 2 and 3 are skill bugs and should abort the whole pass; exit 1 is an argument error from the skill itself and should also abort. Only exit code 4 (Cypher error) triggers the per-file FAILED tracking and the continue-to-next-file flow.
-
-**`_source` read-query failure in 5.2b:** If the `_source` read query in Step 5.2b fails (e.g., graph is corrupted), treat as no `_source` row and force full-replace. Log a warning — the graph may need rebuild. Append a one-line entry to the `warnings` list of the form `"_source read failed for <file_path> — forced full-replace (graph may need rebuild)"`. Do NOT add the file to `files_failed` on the basis of the `_source` read alone; whether the file ultimately fails is determined by the subsequent 5.3 full-replace. A persistent `_source` read failure across every file in the pass is a strong signal that `.cc-master/graph.kuzu/` is corrupted and the user should re-run with `--full` (or delete the directory and re-init).
-
-**Per-pass counters to maintain (consumed by Step 6):**
-
-Maintain these counters across the entire pass (initialize to zero or empty at the start of Step 5):
-
-- `files_processed` — incremented after each file in the set that had its parser invoked (includes FAILED files and skipped-by-hash files; excludes files that were absent on disk and produced `{nodes: [], edges: []}` with no upsert attempted).
-- `files_failed` — list of `<file_path>` strings for every file that hit a Cypher error in 5.3 or a parser error in 5.2.
-- `unchanged_count` — number of files that were SKIPPED by the 5.2b hash-compare (both content hash and indexer version matched the `_source` row). Incremented only by 5.2b. Never incremented when `--full` is set, because `--full` bypasses the skip.
-- `changed_count` — number of files that proceeded through 5.3 full-replace successfully (i.e., DELETE and all INSERTs completed without a Cypher error). Incremented at the end of 5.3 on success. A file that fails in 5.3 is counted in `files_failed`, NOT in `changed_count`. When `--full` is set, every file that reaches 5.3 successfully counts toward `changed_count` regardless of hash state.
-- `deleted_count` — number of files that were present in `_source` at the start of the pass but are no longer on disk, and whose rows were therefore deleted. Populated by Step 4 (absence handling) — incremented once per successful per-file absence sweep (DETACH DELETE of owned nodes plus `_source` row delete). Initialize to `0` at the start of Step 4.
-- `nodes_written` — sum of successful node CREATEs across all files. Increment after each `kuzu_client.py query` exits 0 for a node CREATE in 5.3 B OR for a File / Symbol CREATE in 5.4 Phase 3 (steps 4 and 5).
-- `edges_written` — sum of successful edge CREATEs across all files (including the CONTAINS edges from 5.5 and the REFERENCES edges from 5.4 Phase 3 step 6). Increment after each `kuzu_client.py query` exits 0 for an edge CREATE in 5.3 C, 5.4 Phase 3 step 6, or a CONTAINS CREATE in 5.5.
-- `symbols_written` — sum of successful Symbol CREATEs from 5.4 Phase 3 step 5 across all modules walked in this pass. Distinct from `nodes_written` so Step 6 can surface the code-graph node count independently of the JSON-sourced node count. Increment after each Symbol CREATE exits 0.
-- `references_written` — sum of successful REFERENCES edge CREATEs from 5.4 Phase 3 step 6 across all modules walked in this pass. Distinct from `edges_written` so Step 6 can surface the code-graph edge count independently. Increment after each REFERENCES CREATE exits 0.
-- `warnings` — list of pass-level warnings (e.g., `"CONTAINS finalization"` on a 5.5 error, `"specs parser: skipping non-standard filename foo.md"` bubbled up from the parser, `"_source read failed for <file_path> — forced full-replace (graph may need rebuild)"` from 5.2b, `"code-graph walker failed for <module_name>: <stderr>"` from 5.4 Phase 2, `"code-graph: skipping module <name> — no path recorded"` from 5.4 Phase 1).
-
-Invariant: for any given pass, `files_processed == unchanged_count + changed_count + len(files_failed)` (excluding files absent from disk that were never processed). Use this identity as a self-check at the end of Step 5 — if the arithmetic does not balance, log a pass-level warning rather than aborting, since miscount is a reporting bug, not a correctness bug.
-
-These counters are passed to Step 6 for rendering. Do NOT format them here — this step's responsibility ends at the counters being populated and accurate.
-
 ### Step 6: Summary
 
-This step renders the end-of-pass summary line and releases the Kuzu OS-level lock. It runs unconditionally — even when Step 5 recorded failures in `files_failed`, Step 6 still executes so the user sees the counts before a non-zero exit.
+This step consumes `run_index_summary` (from the Step 4-6 invocation above) and the Step 5.4 module counters (if Step 5.4 ran), and prints one human-readable summary line. The database close is handled by `run_index.py` internally — no separate `kuzu_client.py close` call is issued here unless Step 5.4 ran and held a connection open (in which case Step 5.4's own close handling applies).
 
-**Guard — `--touch` path skips Step 6.** If `touch_target` is set (from Step 1), skip Step 6 entirely — the `## --touch Single-File Refresh` section handles the summary instead. Step 6.6 (close the database) still runs at the end of the touch path, but every other substep of Step 6 (graph-wide counts, the `Indexed:` summary line, the `--full` invariant check, the multi-file `FAILED:` list) is replaced by the single-line touch summary.
+**Step 6.1 — Compose the summary line.**
 
-**Step 6.1 — Collect counts from the graph.**
-
-Issue each of the following count queries via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query`. Every query returns a single row with a single integer column; read that value into a local variable.
+Emit a single line in this format:
 
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (t:Task) RETURN count(t) AS tasks"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (st:Subtask) RETURN count(st) AS subtasks"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (s:Spec) RETURN count(s) AS specs"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (f:Feature) RETURN count(f) AS features"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (m:Module) RETURN count(m) AS modules"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (fi:File) RETURN count(fi) AS files"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH (sy:Symbol) RETURN count(sy) AS symbols"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu "MATCH ()-[r:REFERENCES]->() RETURN count(r) AS references_count"
-```
-
-The last two queries surface the Step 5.4 code-graph pass's output. On projects that never invoke the code-graph pass (no `--code-graph`, no `--full`, no `--module <name>`), both counts are `0` and the corresponding segments of the summary line below render as `0 symbols, 0 references` — zero is not a failure signal, it just reflects that the code-graph layer has not been populated on this project.
-
-If any count query exits non-zero, follow the Step 3 contract table (print stderr JSON prefixed with `"Kuzu count query failed: "`, then continue — a failed count is reported as `?` in the summary line rather than aborting, since the upsert itself already succeeded).
-
-**Step 6.2 — Compute elapsed duration.**
-
-Read the wall-clock start timestamp captured at the beginning of Step 1. Compute `duration = now - start_ts`. Format as a one-decimal float (e.g. `3.4`, `12.1`, `0.2`) — the `{:.1f}` format matches the spec line below.
-
-**Step 6.3 — Print the summary line.**
-
-Emit a single line in this exact format:
-
-```
-Indexed: <C> changed, <U> unchanged, <D> deleted — <T> tasks, <S> specs, <F> features, <M> modules, <Fi> files, <Sy> symbols, <R> references — <secs>s
+index: <mode-descriptor> — <files_total> files (<files_changed> changed, <files_unchanged> unchanged, <files_failed> failed) — <nodes_inserted> nodes inserted, <edges_inserted> edges — kuzu <kuzu_version> — <secs>s
 ```
 
 Where:
-- `<C>` is `changed_count` from Step 5.7 — files that went through full-replace this pass (their content hash differed from the stored `_source` hash, so they were re-parsed and re-upserted).
-- `<U>` is `unchanged_count` from Step 5.7 — files that hit the 5.2b hash-compare skip (content hash and indexer version both matched the stored `_source` row, so no re-parse/re-upsert occurred).
-- `<D>` is `deleted_count` from Step 5.7 — files that were in `_source` at the start of the pass but are no longer on disk; their graph rows and `_source` row were removed during absence handling.
-- `<T>` is the Task count from 6.1 (not subtasks — Subtasks are a separate node type and are not called out in the headline; they are implied by tasks).
-- `<S>`, `<F>`, `<M>`, `<Fi>` are Spec, Feature, Module, File counts respectively.
-- `<Sy>` is the Symbol count from 6.1 — the total number of Symbol nodes produced by Step 5.4's code-graph pass and still present after the pass completes.
-- `<R>` is the REFERENCES count from 6.1 — the total number of REFERENCES edges between File and Symbol nodes, produced by Step 5.4 Phase 3 step 6.
-- `<T>`, `<S>`, `<F>`, `<M>`, `<Fi>`, `<Sy>`, `<R>` are graph totals AFTER the pass completes — they represent the end-state of the graph, not deltas.
-- `<secs>` is the `{:.1f}`-formatted duration from 6.2.
-- Both em-dashes `—` (U+2014), not two hyphens, separate (a) the per-file activity triple from the graph-totals list, and (b) the graph-totals list from the duration.
 
-If `hash_errors` (from the Step 5.2 hash-error accounting, above) is greater than zero, append a trailing segment ` (hash_errors: <N>)` to the summary line — with a single leading space before the opening parenthesis and `<N>` set to the observed counter value. If `hash_errors == 0`, omit the parenthetical entirely (keeps the happy-path output clean).
+- `<mode-descriptor>` is one of `full pass`, `default pass`, `touch <path>` — derived from `run_index_summary.mode` (and `touch_target` when the mode is `touch`).
+- `<files_total>`, `<files_changed>`, `<files_unchanged>`, `<files_failed>`, `<nodes_inserted>`, `<edges_inserted>` come directly from `run_index_summary`.
+- `<kuzu_version>` is `run_index_summary.kuzu_version`.
+- `<secs>` is `run_index_summary.duration_ms / 1000` formatted to one decimal (`{:.1f}`).
 
-**Step 6.4 — Prepend `--full` marker when set.**
-
-If the `full` flag was recorded in Step 1, prepend the literal string `"(--full: forced re-index) "` (including the trailing space) to the summary line BEFORE the word `"Indexed:"`. `--full` now genuinely forces re-index — it bypasses the 5.2b hash-compare skip so every file flows through the 5.3 full-replace and the 5.3c `_source` refresh — and the marker confirms to testers that the forced path ran.
-
-**Step 6.4b — Expected output examples.**
-
-Four example summary lines illustrating the format variants (happy path, one-file change, deletion with hash_errors trailer shown at zero, and `--full` forced re-index):
+Example:
 
 ```
-Indexed: 0 changed, 12 unchanged, 0 deleted — 35 tasks, 6 specs, 0 features, 4 modules, 147 files, 0 symbols, 0 references — 0.8s
-Indexed: 1 changed, 11 unchanged, 0 deleted — 36 tasks, 6 specs, 0 features, 4 modules, 147 files, 0 symbols, 0 references — 1.2s
-Indexed: 0 changed, 11 unchanged, 1 deleted — 36 tasks, 5 specs, 0 features, 4 modules, 147 files, 892 symbols, 2134 references — 0.9s (hash_errors: 0)
-(--full: forced re-index) Indexed: 12 changed, 0 unchanged, 0 deleted — 36 tasks, 5 specs, 0 features, 4 modules, 147 files, 892 symbols, 2134 references — 3.1s
+index: full pass — 24 files (24 changed, 0 unchanged, 0 failed) — 144 nodes inserted, 241 edges — kuzu 0.11.2 — 3.7s
 ```
 
-The third example shows the `(hash_errors: 0)` trailer only for illustrative purposes — in practice, per the `hash_errors == 0` omission rule above, that parenthetical would NOT be emitted when the counter is zero. A real pass emits the trailer only when `hash_errors > 0`.
+**Step 6.2 — `--full` prefix.**
 
-**Step 6.4a — Invariant check: `--full` implies `unchanged_count == 0`.**
+If `full` was set in Step 1, prepend the literal `(--full: forced re-index) ` (including the trailing space) to the summary line BEFORE the word `index:`. This confirms the forced path ran even when the counters would otherwise look like a normal changed-pass.
 
-With `--full` active, every file in the set is forced through 5.3 full-replace (the 5.2b skip is bypassed), so `unchanged_count` SHOULD be 0. If any file is reported as `unchanged` while `--full` is active, that is a bug — most likely a missed bypass path in 5.2b or a counter that was incremented on a code path that should not be reachable under `--full`. After printing the summary line (Step 6.3) and prepending the marker (Step 6.4), if the `full` flag was recorded in Step 1 AND `unchanged_count > 0`, emit a warning line immediately after the summary line:
+**Step 6.3 — `hash_errors` suffix.**
 
-```
-Warning: --full was set but unchanged_count is <N>; expected 0. Likely bug — investigate.
-```
+If `run_index_summary.hash_errors > 0`, append ` (hash_errors: <N>)` to the summary line (single leading space before the opening paren, `<N>` set to the counter value). Omit entirely when the counter is zero to keep the happy-path output clean.
 
-Substitute `<N>` with the observed `unchanged_count`. The warning does NOT change the exit code on its own — it is diagnostic output only. If `--full` is unset, skip this check entirely (any non-zero `unchanged_count` is the happy path when the skip is in effect).
+**Step 6.4 — Surface warnings.**
 
-**Step 6.5 — Emit failed-file list if any.**
-
-If the `files_failed` list from Step 5.7 is non-empty, emit a second line immediately after the summary line:
+For every string in `run_index_summary.warnings`, emit one line to stderr in the format:
 
 ```
-FAILED: <N> files — <comma-separated list of file paths>
+warning: <warning text>
 ```
 
-`<N>` is `len(files_failed)`. The file paths are the literal strings from the list, joined with `", "`. When this line is emitted, the skill's final exit code MUST be non-zero (use `2`, matching the Step 5.7 convention).
+Do NOT rewrite or reorder the warnings — forward them verbatim from the JSON array. If the array is empty, emit nothing.
 
-**Step 6.6 — Close the Kuzu database.**
+**Step 6.5 — Surface Step 5.4 counters (when applicable).**
 
-Before exiting, release the Kuzu OS-level lock by explicitly closing the database so subsequent `cc-master:*` invocations can open it cleanly:
+If Step 5.4 ran, append a second summary line immediately after the primary one:
 
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py close .cc-master/graph.kuzu
+code-graph: <modules_walked> modules (<modules_changed> changed, <modules_unchanged> unchanged, <modules_failed> failed) — <symbols> symbols, <references> references
 ```
 
-This is the last filesystem action the skill performs. Do not issue any further queries after `close`. If the close call itself exits non-zero, print the stderr JSON verbatim prefixed with `"Kuzu close failed: "` and exit non-zero — a lingering lock is a real problem for downstream skills that depend on reading the graph immediately after index finishes.
+The counters come from Step 5.4's per-module tracking (`changed_count`, `unchanged_count`, `files_failed` under the `ast-grep-walk:<module_name>` pseudo-paths, `symbols_written`, `references_written`). If Step 5.4 did NOT run, this line is omitted.
 
-**Step 6.7 — Exit.**
+**Step 6.6 — Exit code.**
 
 Exit with status:
-- `0` — `files_failed` empty and every count/close call succeeded.
-- Non-zero (`2`) — `files_failed` non-empty, or any count/close call failed.
+
+- `0` — `run_index_summary.files_failed == 0`, Step 5.4 (if it ran) reported zero failed modules, and no non-zero exit surfaced from any helper script.
+- Non-zero (`2`) — `run_index_summary.files_failed > 0`, or Step 5.4 reported at least one failed module, or `run_index.py` / the Step 5.4 walker exited non-zero.
 
 ### Step 7: Emit Graph Output Indicator
 
@@ -1277,153 +772,41 @@ If the skill errored during pre-query checks before classification, default to `
 
 ## --touch Single-File Refresh
 
-This section describes the execution path that runs when `--touch <file>` was supplied on the command line. It replaces Steps 4 and 5 (and Step 6's multi-file summary) with a scoped, single-file flow. Every other step of the skill — argument parsing, Kuzu availability check, bootstrap DDL, and the final database close — runs unchanged. This section is the end-to-end contract for that scoped flow; later subtasks that adjust touch behavior MUST edit it here, not by layering additional skip conditions onto Step 4 or Step 5.
+The `--touch <file>` flag invokes `run_index.py --touch <file>` with the canonicalized relative path from Substep 1.5b. `run_index.py` handles the single-file flow end-to-end inside the same Python process the default pass uses: it reads `_source.content_hash` for the target, computes the current hash per the appropriate `## Content Hashing` rule, and either skips (hash match), full-replaces the file's nodes + edges (hash mismatch), or sweeps its `_source` row when the file is missing from disk. The exit-code contract, stdout JSON schema, and warning-surfacing rules from the Step 4-6 invocation block above apply verbatim — `--touch` is not a separate execution path from the skill's perspective, it is one flag threaded through the same bulk-indexer invocation.
 
-**When this section runs.** This section runs if and only if `touch_target` is a non-empty value recorded by Step 1 (Substep 1.1 set it, Substep 1.5 passed the mutual-exclusion check, and Substep 1.5b canonicalized it to the project-root-relative form). When `touch_target` is unset, this entire section is skipped and the skill follows the default pass described in Steps 4, 5, and 6.
-
-**Flow diagram.** Under `--touch`, the skill's execution path is:
+**Summary line for `--touch`.** The Step 6 formatter reads `run_index_summary.mode` (which will be `"touch"` on this path) and `run_index_summary.touch_target` (the canonicalized path) and emits:
 
 ```
-Parse args (Step 1)  →  Check Kuzu (Step 2)  →  Ensure graph (Step 3)  →  Touch execution (this section)  →  Close DB (Step 6.6)
+index: touch <path> — <outcome> — <secs>s
 ```
 
-Steps 4 and 5 are skipped entirely. Step 6's global summary is replaced with this section's single-line touch summary. The `Close DB` hop at the end reuses Step 6.6's `kuzu_client.py close` invocation unchanged — the touch path is not allowed to leak the Kuzu OS-level lock any more than the default path is.
+Where `<outcome>` is derived from the counters:
 
-**Mutual-exclusion reminder.** `--touch` cannot be combined with `--full` (enforced in Step 1 Substep 1.5). So the `--full` override that appears in Step 5.2b does NOT apply in the touch path — `full` is guaranteed to be unset when this section runs. Implementers MUST NOT add `--full`-bypass branches to this flow; if one appears, it is a sign the mutual-exclusion check regressed upstream.
+- `files_changed == 1` → `changed`
+- `files_unchanged == 1` → `unchanged`
+- `files_absent_swept == 1` → `deleted`
+- `files_failed == 1` → `failed`
 
-**Performance expectation.** Target runtime <200ms on the unchanged path, <500ms on the changed path, for a 500-task project. This makes `--touch` safe to call synchronously from other skills after they write (e.g., `kanban-add`, `build`, `qa-review`) — they can invalidate the single file they touched without paying the cost of a whole-repo re-index. Do NOT add benchmarking code to satisfy this note; it is informational and describes the operational contract, not a runtime assertion.
-
-**Slow-path warning.** If the touch execution takes longer than 5 seconds, append `"(slow: <secs>s)"` to the summary line. This is diagnostic only; the operation still completes normally. The threshold is a heuristic — any value substantially above the <500ms changed-path target is a hint that the graph has grown beyond what a single-file refresh can service in a predictable window, or that `DETACH DELETE`'s edge-cascade traversal has hit a pathological fan-out.
-
-**Substep T.1 — Check if `touch_target` exists on disk.**
-
-Using the Bash tool, run:
+Example outcomes:
 
 ```
-[ -e "<touch_target>" ]
+index: touch .cc-master/kanban.json — unchanged — 0.1s
+index: touch .cc-master/specs/42.md — changed — 0.3s
+index: touch .cc-master/specs/99.md — deleted — 0.2s
+index: touch .cc-master/roadmap.json — failed — 0.4s
 ```
 
-Interpret the exit code:
-- `0` → the file exists on disk; proceed to **Substep T.3 (EXISTS branch)**.
-- `1` → the file does not exist on disk; proceed to **Substep T.2 (MISSING branch)**.
-- Any other exit code (permission error, shell error) → treat as a hard failure: set `outcome = "failed"`, record the error text for the summary line, increment `files_failed = 1`, and skip to **Substep T.4 (emit summary)**. Do NOT run DELETE statements on an unknown-state path — the same reasoning as Step 4.2's unknown-state branch applies here.
-
-**Substep T.2 — MISSING branch: single-file absence handling.**
-
-This branch runs the same two-statement deletion used by Step 4.3, but scoped to a single file path (`touch_target`) and without enumerating `_source`. Execute both statements in sequence via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query`:
-
-1. **Delete the file's nodes** (DETACH DELETE removes the nodes and cascades attached edges):
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (n) WHERE n.source_file = $fp DETACH DELETE n" \
-     --params-json '{"fp": "<touch_target>"}'
-   ```
-
-   On non-zero exit, set `outcome = "failed"`, record the stderr text for the summary line, increment `files_failed = 1`, and skip to Substep T.4. Do NOT attempt the `_source` delete after a node-delete failure — the same rationale as Step 4.3's retry contract applies (the next `--touch` or default pass will re-attempt the cleanup).
-
-2. **Delete the `_source` bookkeeping row:**
-
-   ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py query .cc-master/graph.kuzu \
-     "MATCH (s:_source {file_path: $fp}) DELETE s" \
-     --params-json '{"fp": "<touch_target>"}'
-   ```
-
-   On non-zero exit, set `outcome = "failed"`, record the stderr text for the summary line, increment `files_failed = 1`, and skip to Substep T.4. On success, set `outcome = "deleted"` and increment `deleted_count = 1`.
-
-Note: if the file was never indexed (no `_source` row exists for it), both DELETE statements exit 0 with zero rows affected — that is fine. The outcome is still `deleted` for the purposes of the summary line, reflecting "after this pass the graph does not contain this file." An equivalent way to read this: a touch against a file the indexer never saw is a no-op that still reports a consistent end-state.
-
-**Substep T.3 — EXISTS branch: hash-compare and conditional full-replace.**
-
-This branch mirrors Step 5.2b's hash-compare logic and Step 5.3 / 5.3c's full-replace-and-upsert logic, but scoped to a single file. Do NOT re-implement the per-step bodies here — reuse the existing substeps' contracts. The sequence is:
-
-1. **Read the indexer version.** Execute Step 5.0 — read `.claude-plugin/plugin.json`, extract `version`, and bind it to `current_indexer_version` for the remainder of this substep. If `.claude-plugin/plugin.json` is absent or the `version` field is missing, reject with the same error text Step 5.0 specifies and exit non-zero; a touch pass with an unknown indexer version is just as unsafe as a default pass.
-
-2. **Read the stored `_source` row** (if any) for `touch_target`. Run the `MATCH (s:_source {file_path: $fp}) RETURN s.content_hash AS stored_hash, s.indexer_version AS stored_version` query from Step 5.2b's procedure (Substep 1 under that heading), with `$fp` bound to `touch_target`. Interpret the result exactly as Step 5.2b does: empty array → first-index path; one row → capture `stored_hash` and `stored_version`; non-zero exit → log the same warning and fall through to full-replace.
-
-3. **Compute the current hash.** Apply the matching rule from `## Content Hashing` — JSON artifacts rule for `.cc-master/{kanban,roadmap,discovery}.json`, Markdown spec files rule for `.cc-master/specs/<id>.md`. Handle `{"hash": null, ...}` the same way Step 5.2b's Substep 3 does (log, increment `hash_errors`, fall through to full-replace).
-
-4. **Compare and branch:**
-   - If `observed_hash == stored_hash` AND `current_indexer_version == stored_version` → set `outcome = "unchanged"` and increment `unchanged_count = 1`. Do NOT issue DELETE/CREATE, and do NOT modify `_source.last_indexed_at` — the existing row is authoritative as-is (this matches Step 5.2b's "skip" semantics, which leave `_source` untouched on a hash-match).
-   - Else → proceed to the full-replace flow in substep 5.
-
-5. **Full-replace.** Invoke the matching parser from `## Parsers` to produce the `{nodes, edges}` bundle, then execute Step 5.3's three-phase DELETE-and-INSERT for `touch_target` (Phase A: `MATCH (n) WHERE n.source_file = $sf DETACH DELETE n`; Phase B: per-node CREATE; Phase C: per-edge MATCH-and-CREATE). Use the same Cypher templates and the same `<file_path>` = `touch_target` semantics Step 5.3 specifies. If any Cypher statement exits non-zero, set `outcome = "failed"`, record the stderr text for the summary line, increment `files_failed = 1`, and skip to Substep T.4. Do NOT run Substep 6 (the `_source` upsert) after a Phase A/B/C failure — the same rationale as Step 5.3c's precondition applies (a partial upsert must leave `_source` unchanged so the next pass forces a repair).
-
-6. **Upsert `_source`.** On successful completion of Phases A, B, and C, run Step 5.3c's MERGE statement for `touch_target`, binding the parameters exactly as 5.3c defines — `fp` = `touch_target`, `h` = the `observed_hash` already computed in substep 3 (do NOT re-hash), `ts` = a fresh ISO-8601 UTC timestamp, `nc` = `len(bundle["nodes"])`, `ec` = `len(bundle["edges"])`, `v` = `current_indexer_version`. On non-zero exit of the MERGE, set `outcome = "failed"`, record the stderr text for the summary line, increment `files_failed = 1`, and skip to Substep T.4. On success, set `outcome = "changed"` and increment `changed_count = 1`.
-
-Note: the counters (`changed_count`, `unchanged_count`, `deleted_count`, `files_failed`) are local to the touch path in the sense that they are always either 0 or 1 after this section runs — there is exactly one file in play. The names are kept consistent with Step 5.7's vocabulary so implementers do not have to learn a second set of names for the same concept.
-
-**Substep T.4 — Emit the touch summary line.**
-
-Read the wall-clock start timestamp captured at the very start of Step 1 (the same timestamp Step 6.2 consumes — do NOT re-sample it, and do NOT introduce a second timestamp local to the touch path). Compute `duration = now - start_ts` and format as a one-decimal float (matching Step 6.2's `{:.1f}` convention).
-
-Print a single line in this exact format:
-
-```
-Touched: <touch_target> — <outcome> — <secs>s
-```
-
-Where `<outcome>` is one of `changed`, `unchanged`, `deleted`, or `failed` (from the Substep T.2 or T.3 branches above). Both em-dashes are U+2014, matching Step 6.3's formatting. Examples:
-
-```
-Touched: .cc-master/kanban.json — unchanged — 0.1s
-Touched: .cc-master/specs/42.md — changed — 0.3s
-Touched: .cc-master/specs/99.md — deleted — 0.2s
-Touched: .cc-master/roadmap.json — failed — 0.4s
-```
-
-**Slow-path trailer.** If `duration > 5.0` seconds, append ` (slow: <secs>s)` (with a single leading space) to the summary line before printing. The trailer is diagnostic — it does not change the exit code on its own. Example:
-
-```
-Touched: .cc-master/kanban.json — changed — 7.2s (slow: 7.2s)
-```
-
-**Failure second line.** If `files_failed > 0` (i.e., `outcome == "failed"`), emit a second line immediately after the summary line in the format:
+**Failure second line.** If `files_failed > 0`, emit a second line immediately after the summary line:
 
 ```
 FAILED: <touch_target> — <error text>
 ```
 
-Where `<error text>` is the stderr text recorded at the point of failure (from Substep T.1's unknown-state branch, T.2's node-delete or `_source`-delete branch, or T.3's Phase A/B/C or `_source` MERGE branch). The skill's final exit code MUST be non-zero when this line is emitted (see **Substep T.6** for the exact code to select).
+Where `<error text>` is the first entry in `run_index_summary.warnings` that begins with the path (or, if none, a generic `"run_index.py --touch exited non-zero — see stderr"`).
 
-**Substep T.5 — Close the Kuzu database.**
+**Exit codes for `--touch`** mirror the default-path contract (Step 4-6 exit-code table): `0` on success, `2` on Kuzu binding missing, `3` on database corruption, `4` on parser or Cypher error, `1` otherwise. Step 1's argument-validation failures still exit `1` before the touch path is ever reached.
 
-Execute Step 6.6 verbatim — `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py close .cc-master/graph.kuzu`. The same error-handling contract from Step 6.6 applies: if `close` exits non-zero, print the stderr JSON prefixed with `"Kuzu close failed: "` and exit non-zero (exit code `3`, per the **Substep T.6** table — a close failure is a Kuzu database-path issue, not a Cypher error).
-
-**Substep T.6 — Exit codes.**
-
-The touch path uses a small, distinct exit-code contract so other skills can parse the outcome without grepping stdout:
-
-| Code | Meaning | When |
-|------|---------|------|
-| `0`  | Success | `outcome` is `changed`, `unchanged`, or `deleted`, AND the close call in T.5 succeeded. |
-| `1`  | Unexpected error | Any failure not covered by `2`, `3`, or `4` (defensive default — should not occur on a well-formed input). |
-| `2`  | Argument validation failure | Rejected by Step 1's argument parser (missing value, unknown flag, `--touch` combined with `--full`). Step 1 owns this exit — listed here for completeness so callers see the full contract in one place. |
-| `3`  | Kuzu database-path issue | `.cc-master/graph.kuzu/` is missing, unreadable, or cannot be opened; or Step 6.6's `close` call fails. Should not occur if Step 3's bootstrap ran cleanly earlier in the same invocation. |
-| `4`  | Cypher error during touch execution | Any non-zero exit from `kuzu_client.py query` during Substep T.2's DELETE statements or Substep T.3's Phase A/B/C / `_source` MERGE statements. This is the most common failure mode in practice and is what the `FAILED:` second line reports on. |
-
-When `outcome == "failed"` because of a T.2 or T.3 Cypher error, select exit code `4`. When the failure is a T.5 close problem, select exit code `3`. When the failure is anything else (e.g., an unhandled exception inside the touch path before the summary line is computed), select exit code `1`. Step 1's argument-validation failures exit `2` before the touch path ever runs.
-
-**Invariant.** The `--touch` path MUST produce exactly one summary line to stdout (plus an optional FAILED second line). No other output on the success path. This constraint makes the touch path safely callable from other skills that parse the last stdout line.
-
-**Example outcomes.** The four possible end states, as a caller would observe them at a terminal:
-
-```
-$ /cc-master:index --touch .cc-master/kanban.json
-Touched: .cc-master/kanban.json — unchanged — 0.12s
-
-$ /cc-master:index --touch .cc-master/kanban.json   # after a change
-Touched: .cc-master/kanban.json — changed — 0.31s
-
-$ /cc-master:index --touch .cc-master/specs/99.md   # file missing
-Touched: .cc-master/specs/99.md — deleted — 0.08s
-
-$ /cc-master:index --touch .cc-master/kanban.json   # Cypher error
-Touched: .cc-master/kanban.json — failed — 0.45s
-FAILED: .cc-master/kanban.json — Binder exception: Property priority has data type STRING not VARCHAR
-# exit 4
-```
+**Invariant.** The `--touch` path MUST produce exactly one summary line on stdout (plus an optional `FAILED:` second line). No other stdout output on the success path. This keeps the touch path safely parseable by other skills that invoke it after they write (e.g., `kanban-add`, `build`, `qa-review` call `run_index.py --touch <their-file>` and parse the last stdout line to decide whether to surface the index outcome to the user).
 
 ## What NOT To Do
 
