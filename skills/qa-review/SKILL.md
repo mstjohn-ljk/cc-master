@@ -429,6 +429,42 @@ The values above are illustrative. The `mode` field is one of `"graph"`, `"json-
 
 **Pass threshold:** Score >= 90 AND zero unmet acceptance criteria AND zero critical/high findings (including authorization HIGH findings). A single authorization HIGH finding alone is sufficient to fail qa-review because the agent modified files outside the spec's authorization.
 
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
+```
+
+**qa-review write scope.** This skill writes review report JSON to `.cc-master/specs/<task-id>-review-<N>.json` (NOT a kanban write — does not trigger `--touch`) AND writes review metadata (latest review path, iteration counter, last-pass score) back to the parent task in `.cc-master/kanban.json` (a kanban write — DOES trigger `--touch`). The single coalesced `--touch` fires once after the kanban metadata writeback completes, regardless of how many review JSON files were created during the invocation.
+
 ## What NOT To Do
 
 - Do not fix issues — that's qa-fix's job. Report only.

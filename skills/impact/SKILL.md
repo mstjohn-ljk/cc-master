@@ -675,6 +675,44 @@ After the "Written" line, stop. The skill invocation is complete.
 
 `cc-master:impact` is standalone — there is no chain point. Once Step 5 has written the output file and printed its single `Written: .cc-master/impact/<slug>.json` line, the skill stops. Do not print a follow-up menu, do not prompt the user for a next step, do not auto-invoke any other skill. This is a query-only read-side skill by design: it produces an artifact for human or downstream-skill consumption, and does not itself trigger the next pipeline step. Future readers who go looking for a "what next" section in this file will not find one, and that is the documented behavior.
 
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
+```
+
+**Impact write scope.** This skill writes telemetry to `.cc-master/impact-telemetry/<batch>-wave-<n>-<ts>.json` (NOT a kanban write — does not trigger `--touch`) AND writes the per-target impact analysis to `.cc-master/impact/<slug>.json` (also NOT a kanban write). When impact is invoked from a flow that subsequently writes impact-derived metadata back to a kanban task (e.g., a future build or qa-review integration that records detected blast-radius warnings on the parent task), the calling skill — not impact itself — owns the kanban write and the subsequent `--touch` invocation per its own `## Post-Write Invalidation` section. Standalone impact invocations skip the `--touch` entirely per the zero-writes rule.
+
+Note: this skill currently has no explicit kanban-write step in `## Process`; the section is present so any future kanban writes added to this skill inherit the contract by default.
+
 ## What NOT To Do
 
 - Do not fall back to JSON when the graph is absent or stale. This skill has no meaningful JSON substitute — the symbol-level `REFERENCES` edges required for accurate blast radius only exist in the graph. Print the diagnostic from Step 2 and stop.

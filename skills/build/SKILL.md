@@ -370,6 +370,8 @@ After each wave, verify agent output: read the modified files, check for conflic
 - If any subtask failed, attempt to fix it before moving to the next wave
 - If fix fails, stop and report: `Wave 1 failed on subtask #14: <error>. Fix manually or re-run.`
 
+This is one of multiple kanban writes in this invocation; the single coalesced `--touch` fires once at the end of the invocation per the `## Post-Write Invalidation` section, not after this individual step.
+
 **After each wave in multi-task mode**, print which parent tasks have had all subtasks completed:
 ```
 Wave 2 complete (2/5 waves done)
@@ -452,6 +454,8 @@ Review the failures and either fix manually or re-run /cc-master:build.
 **Multi-task:** For each task individually, update in kanban.json:
 - If its verification passed: set metadata.phase = "qa", update `updated_at`
 - If its verification failed: keep as `in_progress` with failure notes in description, update `updated_at`
+
+This is one of multiple kanban writes in this invocation; the single coalesced `--touch` fires once at the end of the invocation per the `## Post-Write Invalidation` section, not after this individual step.
 
 ### Step 7b: Update Discovery and Roadmap
 
@@ -553,10 +557,12 @@ Read the trace JSON. Check the `status` field and `findings` array.
   ```
 - Store the trace path in the task's metadata: update kanban.json with `metadata.post_build_trace = "traces/<slug>.json"`
 - Set the task's `metadata.phase` to `"trace-failed"` in kanban.json
+- After this write completes, perform Post-Write Invalidation per the `## Post-Write Invalidation` section.
 - Stop. Do not chain to qa-review or qa-loop.
 
 **If the trace status is `all_connected` with no `CRITICAL` or `HIGH` findings:**
 - Store the trace path in the task's metadata: update kanban.json with `metadata.post_build_trace = "traces/<slug>.json"`
+- After this write completes, perform Post-Write Invalidation per the `## Post-Write Invalidation` section.
 - Print: `"Post-build trace PASSED: all_connected, no critical/high findings."`
 - Proceed to Step 8
 
@@ -812,6 +818,42 @@ I found no stub/mock code. The implementation handles [edge cases].
 
 If any Step A-D item fails, fix it before reporting complete. Do not report issues you cannot fix — escalate instead.
 ```
+
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
+```
+
+**Build invocation scope.** For the `build` skill, "one invocation" means one full `/cc-master:build` run — not one parallel-agent dispatch, not one subtask, not one wave. Build performs many kanban writes (subtask status flips after each wave, parent task `metadata.phase` updates, post-build trace metadata writes, post-Step-7b discovery/roadmap link-back writes). The single coalesced `--touch .cc-master/kanban.json` invocation MUST fire ONCE at the end of the build invocation — the post-build trace step (Step 7d) is the natural firing point because it runs after all wave-level writes and after the final `metadata.phase` flip but before the Chain Point. Parallel-agent dispatches inside a wave do NOT individually fire `--touch` — they write to `kanban.json` and the coordinator session emits the single coalesced `--touch` after Step 7d completes.
 
 ## What NOT To Do
 
