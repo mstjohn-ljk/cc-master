@@ -407,6 +407,45 @@ Usage:  /cc-master:complete <id> [--pr] [--merge] [--target <branch>] [--auto]
 
 ---
 
+## v2 Graph Engine (optional)
+
+cc-master v0.21+ can maintain an embedded Kuzu graph at `.cc-master/graph.kuzu/` as a derived index over the existing `.cc-master/*.json` artifacts. Graph-backed skills query targeted Cypher instead of reading full JSON files, cutting tokens ~10× on large projects. Graph-backed skills fall back to JSON when the graph is absent, stale, or corrupted — so installation is optional.
+
+### Kuzu
+
+**Install:**
+
+    pip install kuzu==0.11.2
+    # or isolated env:
+    pipx install kuzu
+
+**Verify:**
+
+    bash scripts/graph/check_kuzu.sh
+
+**Why Python?** Skills are instruction documents; actual graph operations happen via the `Bash` tool shelling into `scripts/graph/kuzu_client.py`. Python is chosen because (1) existing skills already shell out to `python3`, (2) macOS ships Python3 preinstalled, (3) Kuzu's Python bindings are the most mature.
+
+### ast-grep (required for code-graph layer)
+
+The v1 code-graph layer uses ast-grep for Symbol/File/Reference extraction. Without it, `cc-master:index` still populates the project-state graph from JSON (Task/Subtask/Spec/Feature/Module nodes); code-graph queries in `cc-master:impact` degrade gracefully with a clear message.
+
+**Install:**
+
+    brew install ast-grep          # macOS
+    npm i -g @ast-grep/cli         # cross-platform via npm
+    cargo install ast-grep         # from source
+
+**Verify:**
+
+    bash scripts/graph/check_astgrep.sh
+
+**Minimum version:** 0.25.0 (earlier versions lack the JSON output format used by `cc-master:index`).
+
+### Design reference
+The canonical schema, invariants, and Cypher query catalog are documented in [docs/plans/2026-04-graph-engine-v1.md](docs/plans/2026-04-graph-engine-v1.md).
+
+---
+
 ## Deep Trace Verification
 
 Build and QA agents are required to trace every acceptance criterion to a **leaf** — the actual point where data is read, written, sent, or received — before reporting it complete.

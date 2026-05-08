@@ -14,3 +14,6 @@ Thumbs.db
 
 # CC project config (local, not committed)
 CLAUDE.md
+
+# Python bytecode cache
+__pycache__/

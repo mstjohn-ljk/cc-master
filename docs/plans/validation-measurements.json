@@ -1,0 +1,182 @@
+{
+  "measurements_date": "2026-04-19T20:00:00Z",
+  "target_project": "/Users/mstjohn/Documents/SRC/LJK/cc-master",
+  "cc_master_commit": "cff23024549942c8abd30beaaa3a2fc3fb042de2",
+  "cc_master_branch": "v2-graph-engine",
+  "cc_master_plugin_version": "0.21.0-dev.5",
+  "python_interpreter": "/tmp/kuzu-venv/bin/python3 (CPython 3.13, kuzu 0.11.2)",
+  "ast_grep_version": "0.42.1",
+
+  "token_reduction": {
+    "method": "scripts/graph/measure_kanban_savings.sh + scripts/graph/measure_spec_context_savings.sh run from repo root with PATH=/tmp/kuzu-venv/bin:$PATH",
+    "status": "ran",
+    "design_target_ratio": 5.0,
+    "raw_output": {
+      "measure_kanban_savings_sh": {
+        "populated_tasks": 350,
+        "populated_subtasks": 150,
+        "blocked_by_edges": 55,
+        "json_bytes": 595293,
+        "graph_bytes": 88361,
+        "ratio": 6.7
+      },
+      "measure_spec_context_savings_sh": {
+        "populated_modules": 22,
+        "populated_specs": 30,
+        "populated_files": 66,
+        "contains_edges": 66,
+        "owner_specs": 27,
+        "json_bytes": 248572,
+        "graph_bytes": 37055,
+        "ratio": 6.7
+      }
+    },
+    "summary": {
+      "kanban_family_aggregate": {
+        "before_bytes": 595293,
+        "after_bytes": 88361,
+        "reduction_pct": 85.2,
+        "ratio_x": 6.7,
+        "skills_covered": [
+          "cc-master:kanban",
+          "cc-master:kanban-add",
+          "cc-master:build",
+          "cc-master:complete",
+          "cc-master:qa-review",
+          "cc-master:qa-fix",
+          "cc-master:qa-loop",
+          "cc-master:pr-review",
+          "cc-master:gap-check",
+          "cc-master:align-check",
+          "cc-master:release-docs",
+          "cc-master:impact"
+        ]
+      },
+      "spec_context_family_aggregate": {
+        "before_bytes": 248572,
+        "after_bytes": 37055,
+        "reduction_pct": 85.1,
+        "ratio_x": 6.7,
+        "skills_covered": [
+          "cc-master:spec",
+          "cc-master:build",
+          "cc-master:qa-review",
+          "cc-master:pr-review",
+          "cc-master:impact",
+          "cc-master:debug",
+          "cc-master:trace",
+          "cc-master:config-audit",
+          "cc-master:api-payload-audit",
+          "cc-master:perf-audit"
+        ]
+      }
+    },
+    "note": "Per-skill before/after byte counts are not produced by the two shipped measurement scripts — they emit family-level aggregates against canonical fixtures (tests/fixtures/kanban-500.json, tests/fixtures/specs-30/). The 22 refactored skills all cite either prompts/kanban-write-protocol.md or prompts/graph-read-protocol.md (grep confirms 25 files do so; the 22 figure in MEMORY.md excludes skills/index and skills/impact which are the graph layer itself plus the trace/stub-hunt/smoke-test/qa-ui-review/research/insights/doc-review/config-sync group that only cite the protocols for write-invalidation purposes). Both aggregate ratios are identical at 6.7x, meeting the 5x design target with a 1.7x margin."
+  },
+
+  "cold_index": {
+    "method": "scripts/graph/measure_code_graph_index.sh --invoke /tmp/kuzu-venv/bin/python3 /tmp/cc-master-index-driver.py (per subtask #115 validation-notes.md Operation 2)",
+    "wall_seconds": 6.9,
+    "breakdown_seconds": {
+      "ast_grep_walk": 0.541,
+      "kuzu_upsert": 6.375
+    },
+    "files_indexed": 568,
+    "symbols_indexed": 90,
+    "references_indexed": 153,
+    "design_target_seconds": 60,
+    "pass": true,
+    "note": "Measures code-graph portion only (File/Symbol/REFERENCES nodes) via a 108-line validation driver; does not include Task/Subtask/Spec/Feature/Module/_source families that the full cc-master:index writes. Passes the 60s scaling gate with 53s margin. Per subtask #115, cc-master:index is a Claude Code slash command and has no shell-invokable driver — any reproduction must construct one."
+  },
+
+  "touch_reindex": {
+    "method": "Single-file MERGE upsert proxy measured via embedded Python at /tmp/touch-proxy2.py — kuzu_client.py has no --touch subcommand (confirmed via --help: only init/query/close). The --touch <file> flag belongs to the cc-master:index skill, which is a slash command and cannot be driven non-interactively. Proxy timed 3 runs of: read .cc-master/kanban.json -> open DB -> MERGE (:File {path}) -> close. This models the minimum real work --touch would perform per file.",
+    "runs_seconds": [0.0847, 0.0398, 0.0353],
+    "wall_seconds": 0.040,
+    "wall_seconds_unit": "median_of_3",
+    "breakdown_seconds_median": {
+      "file_read": 0.0001,
+      "db_connect": 0.0115,
+      "merge_upsert": 0.0069,
+      "close": 0.0213
+    },
+    "design_target_seconds": 0.2,
+    "pass": true,
+    "note": "Proxy is lower-bound (single MERGE, no secondary Task/Subtask/BLOCKED_BY rewrites that the real --touch .cc-master/kanban.json would perform). Even so it is 5x under the 0.2s target. True end-to-end --touch measurement requires a shell-invokable driver for cc-master:index, which is not shipped in v0.21.0 — subtask #117 should flag this as a known gap in the release doc and recommend it as a v0.22 instrumentation task. Subtask #115's 6.9s 'warm re-run' number was a full-walk re-index, not a single-file touch, and should NOT be quoted as the --touch latency."
+  },
+
+  "impact_accuracy": {
+    "intra_file": {
+      "symbol": "_load_kuzu",
+      "def_file": "scripts/graph/kuzu_client.py",
+      "ground_truth_count": 12,
+      "graph_result_count": 12,
+      "precision": 1.0,
+      "recall": 1.0,
+      "note": "3 definitions + 9 distinct call sites across scripts/graph/kuzu_client.py and its two worktree copies; all recovered by graph."
+    },
+    "cross_file": {
+      "symbol": "classify_test_file",
+      "def_file": "scripts/graph/astgrep_walker.py",
+      "def_line": 153,
+      "ground_truth": {
+        "same_file_call_sites": 2,
+        "same_file_call_lines": [233, 631],
+        "cross_file_call_sites": 20,
+        "cross_file_call_file": "scripts/graph/test_astgrep_walker.py"
+      },
+      "graph_result": {
+        "same_file_refs_distinct_lines": 2,
+        "same_file_ref_lines": [233, 631],
+        "cross_file_refs": 0
+      },
+      "precision": 1.0,
+      "recall_same_file": 1.0,
+      "recall_cross_file": 0.0,
+      "recall_overall": 0.091,
+      "ground_truth_count": 22,
+      "graph_result_count": 2,
+      "note": "Global cross-file REFERENCES count in the entire graph is 0 out of 306 total edges (`MATCH (f:File)-[r:REFERENCES]->(s:Symbol) WHERE f.path <> s.file RETURN count(*)` returned 0). This is the ast-grep v1 dynamic-dispatch gap documented in MEMORY.md: the walker matches call-site symbols textually but does not resolve cross-module imports to the defining Symbol node. SCIP swap in v0.22 (per docs/plans/2026-04-graph-engine-v1.md) will close this gap. Precision is still 100% — every graph hit is a real call — but recall collapses on symbols whose primary usage is in a different file than the definition. Impact skill output therefore SHOULD document this limitation in the v0.21.0 release notes (subtask #117)."
+    },
+    "overall_note": "The MEMORY.md claim of '~80% accuracy' for ast-grep v1 holds for combined precision across both tests (24/24 = 100% precision) but overall recall on cross-file symbols is near zero. The ~80% figure appears to be an upper-bound estimate on a codebase where most references are intra-file; cc-master itself has heavier cross-file coupling via Python imports, so recall here is worse."
+  },
+
+  "graceful_degradation": {
+    "exit_code_on_absent": 3,
+    "exit_code_source": "subtask #115 Operation 4: moved .cc-master/graph.kuzu aside, ran kuzu_client.py query, captured exit=3 and JSON error {\"error\": \"database not found at ...\"}",
+    "indicator_contract_verified": true,
+    "contract_source": "/Users/mstjohn/Documents/SRC/LJK/cc-master/.cc-master/worktrees/batch-19-22/skills/kanban/SKILL.md",
+    "indicator_strings_found": [
+      "Graph: fresh",
+      "Graph: stale — fell back to JSON",
+      "Graph: absent — fell back to JSON"
+    ],
+    "skill_md_lines": {
+      "first_run_check_line": 38,
+      "step_6_emit_graph_output_indicator_line": 234,
+      "fresh_string_line": 238,
+      "stale_string_line": 239,
+      "absent_string_line": 240
+    },
+    "note": "Verified by Grep against the worktree SKILL.md. First-run check (line 38), Step 6 header 'Emit Graph Output Indicator' (line 234), and all three literal indicator strings (lines 238-240) are present. The default-on-error clause at line 242 instructs skills to emit 'Graph: absent — fell back to JSON' if a pre-query check errored, closing the indicator contract. kanban skill is representative of the 22 refactored skills — task #20's indicator wiring is confirmed in-place."
+  },
+
+  "regressions": [
+    {
+      "measurement": "impact_accuracy.cross_file.recall_cross_file",
+      "observed": 0.0,
+      "expected": "non-zero for cross-module Python calls",
+      "design_target_source": "docs/plans/2026-04-graph-engine-v1.md (MEMORY.md cites '~80% accuracy' for ast-grep v1)",
+      "severity": "known-limitation",
+      "planned_fix": "SCIP swap in v0.22 replaces ast-grep walker while preserving the Kuzu schema; REFERENCES edge count is expected to rise dramatically with cross-module resolution."
+    },
+    {
+      "measurement": "touch_reindex.true_single_file_latency",
+      "observed": "proxy only",
+      "expected": "end-to-end cc-master:index --touch <file> measurement",
+      "design_target_source": "spec #22 AC 6 measurement #3",
+      "severity": "instrumentation-gap",
+      "planned_fix": "Expose --touch as a kuzu_client.py subcommand OR ship a shell-invokable driver for cc-master:index so future validation runs can measure the real single-file re-index latency. MEMORY.md note '--touch fires unconditionally; cc-master:index handles graph-absent internally' is accurate but not shell-reachable in v0.21.0."
+    }
+  ]
+}

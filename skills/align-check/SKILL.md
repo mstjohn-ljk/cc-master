@@ -38,6 +38,24 @@ Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
 ### Step 1: Load the Alignment Chain
 
+**Graph-backed read contract.** Before any graph query this skill may issue during this step or any later step, the following contract block from `prompts/graph-read-protocol.md` applies verbatim:
+
+```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
 **Parse arguments:**
 1. Strip `--auto` flag. Remember if it was present.
 2. Validate remaining argument as a task ID (or comma-separated IDs) per Input Validation Rules.
@@ -224,7 +242,19 @@ For each misalignment found (Check 1 missing/critical, Check 3 not_satisfied):
 
 Do NOT create tasks for Check 2 findings that already appear in a qa-review report — those are already tracked.
 
-### Step 7: Chain Point
+After this write completes, perform Post-Write Invalidation per the `## Post-Write Invalidation` section.
+
+### Step 7: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 1:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
+
+### Step 8: Chain Point
 
 **Determine failure type before chaining.** Alignment failures fall into two categories with different remediation paths:
 - **Spec gaps** (Check 1 failures: `missing` or `partially_captured` requirements) — the spec must be updated. `qa-fix` cannot help because it only addresses code findings, not missing spec content. Remediation: re-run `/cc-master:spec <id>` to add the missing requirement, then rebuild.
@@ -257,6 +287,40 @@ Then wait for user response:
 - "2", "spec", "s": Invoke Skill with `skill: "cc-master:spec"`, `args: "<task-id>"`. Stop.
 - "3", "review", "r": Print the report path and end.
 - "4", "stop", or anything else: End.
+
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
+```
 
 ## What NOT To Do
 

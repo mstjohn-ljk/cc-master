@@ -27,6 +27,26 @@ Never use CC's TaskCreate, TaskGet, TaskList, or TaskUpdate tools.
 
 ## Process
 
+### Step 0: Graph-Read Protocol Citation
+
+This skill is graph-backed — `.cc-master/kanban.json` (and the other `.cc-master/` JSON/markdown artifacts this skill consumes) are mirrored in the Kuzu graph index at `.cc-master/graph.kuzu`, and this skill invalidates the graph on write-completion per `prompts/kanban-write-protocol.md`. Paste the following contract block verbatim before any graph-backed read — the text is the required citation of `prompts/graph-read-protocol.md` and propagates the three pre-query checks, the one-warning-per-session rule, the `Graph: <state>` output-indicator requirement, and the verbatim JSON-fallback fragment downstream.
+
+```
+First-run check — if .cc-master/graph.kuzu is absent, follow the ## First-Run Prompt section of this protocol before Check 1.
+Before any graph query, this skill MUST follow the three pre-query checks in prompts/graph-read-protocol.md (directory exists, _source hash matches, query executes cleanly). On any check failure, fall back to JSON and emit one warning per session.
+Check 1 — `.cc-master/graph.kuzu` exists on disk (file or directory, readable).
+Check 2 — `_source.content_hash` matches the current on-disk hash for every dependent JSON/markdown artifact.
+Check 3 — the Cypher query executes cleanly via `${CLAUDE_PLUGIN_ROOT}/scripts/graph/kuzu_client.py` (exit code 0, empty stderr).
+Emit at most one fallback warning per session; do NOT retry the graph query after fallback has started.
+Emit the Graph: <state> output indicator per the ## Output Indicator section as the last line of the primary summary.
+If any pre-query check above fails for this query, fall back to reading
+.cc-master/<artifact>.json directly and computing the same result in memory.
+Print one warning line per session on first fallback:
+  "Graph absent/stale — falling back to JSON read for <artifact>"
+Do NOT retry the graph query during the same session once fallback has
+started — retries mask real corruption and waste tokens.
+```
+
 ### Step 1: Identify the Task(s)
 
 Arguments provide one or more task IDs:
@@ -128,6 +148,8 @@ When the review passes:
    - Set `metadata.phase` to `"review-complete"`
    - Update `updated_at` to current ISO timestamp
 
+   This is one of multiple kanban writes in this invocation (multi-task batches write metadata for each task that passes); the single coalesced `--touch` fires once at the end of the invocation per the `## Post-Write Invalidation` section, not after this individual step.
+
 2. Print the final summary:
 ```
 QA Loop Complete: PASSED
@@ -180,6 +202,8 @@ When max iterations reached without passing:
    - Set `metadata.phase` to `"qa-escalated"`
    - Update `updated_at` to current ISO timestamp
 
+   This is one of multiple kanban writes in this invocation (multi-task batches write metadata for each task processed); the single coalesced `--touch` fires once at the end of the invocation per the `## Post-Write Invalidation` section, not after this individual step.
+
 2. Print the escalation report:
 ```
 QA Loop Complete: ESCALATED TO HUMAN
@@ -231,6 +255,16 @@ Iteration History:
   Round 3: 83/100  (-2, REGRESSION detected)
 ```
 
+### Step 5: Emit Graph Output Indicator
+
+As the last line of the primary summary (before any chain-point prompt), print exactly ONE of these three strings based on the pre-query check outcomes from Step 0:
+
+- `Graph: fresh` — all three pre-query checks passed and the Cypher result was consumed.
+- `Graph: stale — fell back to JSON` — Check 2 hash mismatch for at least one dependent artifact (worst-state-wins per `prompts/graph-read-protocol.md § Output Indicator`).
+- `Graph: absent — fell back to JSON` — Check 1 failed (directory missing or unreadable).
+
+If the skill errored during pre-query checks before classification, default to `Graph: absent — fell back to JSON`. Do NOT omit the indicator. Do NOT duplicate it per artifact — one line at the bottom of the primary summary block.
+
 ## Accepted Limitations
 
 Not every finding needs to reach zero. The pass threshold is:
@@ -244,6 +278,40 @@ Low and medium findings can be accepted if:
 - They're genuine low-severity issues that don't affect functionality
 
 Document all accepted limitations in the final report.
+
+## Post-Write Invalidation
+
+Every write to `.cc-master/kanban.json` performed by this skill MUST be followed by a single graph-invalidation call at the end of the invocation, per the canonical contract in `prompts/kanban-write-protocol.md`.
+
+```
+This skill writes `.cc-master/kanban.json` and MUST follow the write-and-invalidate
+contract in prompts/kanban-write-protocol.md. The four-step protocol is:
+  1. Read `.cc-master/kanban.json` and parse JSON (treat missing file as
+     {"version": 1, "next_id": 1, "tasks": []}).
+  2. Apply all mutations in memory — assign new IDs from next_id, append new tasks,
+     modify fields on existing tasks, set updated_at on every affected task.
+  3. Write the entire updated JSON document back to `.cc-master/kanban.json`.
+  4. After ALL kanban writes for this invocation have completed, invoke the Skill
+     tool EXACTLY ONCE with:
+       skill: "cc-master:index"
+       args: "--touch .cc-master/kanban.json"
+     These are LITERAL strings — never placeholders, never variables.
+
+Batch coalescing — one --touch per invocation. When a single invocation produces
+multiple kanban.json writes (multi-task batch, create + link-back, multi-edge
+blocked_by rewrite), fire the --touch EXACTLY ONCE at the end after the LAST write,
+never per write and never per task. If zero writes happened, skip the --touch
+entirely.
+
+Fail-open recovery. If cc-master:index --touch returns ANY non-zero exit code, the
+kanban.json write STANDS — never roll back, never delete, never undo. Emit EXACTLY
+ONE warning line per session:
+  Warning: graph invalidation failed (exit code <N>) — next graph-backed skill will fall back to JSON. Run /cc-master:index --full to rebuild.
+Substitute the observed exit code for <N>. Do NOT retry the touch. Do NOT prompt the
+user. The single warning line is the entire write-side recovery protocol — the next
+graph-backed read will hash-check, detect staleness, and fall back to JSON per
+prompts/graph-read-protocol.md. Correctness is preserved unconditionally.
+```
 
 ## What NOT To Do
 

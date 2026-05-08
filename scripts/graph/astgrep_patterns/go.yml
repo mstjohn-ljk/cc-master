@@ -1,0 +1,27 @@
+# Go patterns for the cc-master code-graph walker.
+
+function:
+  - pattern: "func $NAME($$$ARGS) $$$BODY"
+  - pattern: "func $NAME($$$ARGS) $RET { $$$BODY }"
+
+method:
+  # Receiver-bound methods. ast-grep cannot resolve interface dispatch;
+  # resolution is out of scope for the v1 walker (subtask 77).
+  - pattern: "func ($$$RECV) $NAME($$$ARGS) $$$BODY"
+
+struct:
+  - pattern: "type $NAME struct { $$$FIELDS }"
+
+interface:
+  - pattern: "type $NAME interface { $$$BODY }"
+
+type:
+  - pattern: "type $NAME = $$$RHS"
+  - pattern: "type $NAME $$$RHS"
+
+import:
+  - pattern: "import \"$NAME\""
+  - pattern: "import $NAME \"$$$PATH\""
+
+call:
+  - pattern: "$NAME($$$ARGS)"

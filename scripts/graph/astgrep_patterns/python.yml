@@ -1,0 +1,32 @@
+# Python patterns for the cc-master code-graph walker.
+# Each top-level key names an emit category (kind). The walker interprets:
+#   function / class / method / struct / interface / type / enum
+#     -> Symbol records (metaVariable NAME gives the symbol name)
+#   import / call / type_ref
+#     -> Reference records (metaVariable NAME gives the referenced symbol name)
+# Each list entry is `pattern: "<ast-grep pattern>"`.
+#
+# Body-free patterns are preferred: ast-grep consumes nested matches inside a
+# body meta-variable, so `def $NAME($$$ARGS): $$$BODY` only returns the
+# top-level def. `def $NAME($$$ARGS)` returns every function and method.
+
+function:
+  - pattern: "def $NAME($$$ARGS)"
+
+class:
+  - pattern: "class $NAME"
+
+method:
+  # Python methods surface through the function pattern — they are
+  # indistinguishable at the syntax level without scope tracking. Dispatch
+  # resolution is out of scope for the v1 walker (subtask 77). This pattern
+  # is retained as an intentional heuristic even though ast-grep's
+  # class-scoped matching only catches the first method per class.
+  - pattern: "class $$$: def $NAME($$$ARGS): $$$BODY"
+
+import:
+  - pattern: "import $NAME"
+  - pattern: "from $NAME import $$$NAMES"
+
+call:
+  - pattern: "$NAME($$$ARGS)"
